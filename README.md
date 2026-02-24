@@ -11,7 +11,7 @@ Follow the steps below to set up the development environment.
 ### Run the following command that calls the env script
 
 ```bash
-bash scripts/setup_env.sh
+bash scripts/bash/setup_env.sh
 ```
 
 ## Inspecting the Dataset
@@ -21,7 +21,7 @@ Before preprocessing, you can inspect the dataset structure using the inspection
 ### Run the following command that calls the data inspection script 
 
 ```bash
-python scripts/inspect_data.py --limit 3
+python scripts/python/inspect_data.py --limit 3
 ```
 
 It has available three arguments:
