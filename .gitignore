@@ -1,0 +1,40 @@
+# Data formats
+*.csv
+*.parquet
+*.json
+
+# Data directories
+raw_data/
+preprocessed_data/
+datasets/
+data/
+
+# Model weighta
+*.h5
+*.pt
+
+# Checkpoints
+checkpoints/
+outputs/
+runs/
+*.ckpt
+
+# Environemnt
+.venv/
+venv/
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+
+# caches
+.cache/
+huggingface/
+__pycache__/
+*.pyc
+
+
+
