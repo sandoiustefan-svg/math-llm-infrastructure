@@ -7,6 +7,16 @@ from datasets import load_dataset
 
 @dataclass
 class ReadConfig:
+    """
+    Configuration for streaming the OpenMathInstruct-2 dataset.
+
+    Attributes:
+        dataset_name: HuggingFace dataset identifier.
+        split: Dataset split to load (e.g., "train").
+        streaming: If True, stream examples without loading into memory.
+        limit: Optional maximum number of examples to yield.
+        skip: Number of initial examples to skip.
+    """
     dataset_name: str = "nvidia/OpenMathInstruct-2"
     split: str = "train"
     streaming: bool = True

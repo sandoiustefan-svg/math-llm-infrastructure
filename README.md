@@ -70,7 +70,6 @@ The preprocessing script performs the following steps:
 ## Running Preprocessing
 
 ### Laptop (recommended first)
-
 ```bash
 python scripts/python/preprocess_data.py \
   --tokenizer mistralai/Mistral-7B-v0.1 \
@@ -79,3 +78,15 @@ python scripts/python/preprocess_data.py \
   --out-dir data/processed/openmathinstruct2_debug \
   --shard-num-seqs 256
 ```
+
+### Available arguments (Tokenization & Packing)
+
+| Argument | Description |
+|----------|------------|
+| `--tokenizer` | HuggingFace tokenizer name or local path (LLaMA-compatible) |
+| `--seq-len` | Number of tokens per packed sequence (default: `2048`) |
+| `--shard-num-seqs` | Number of sequences per saved `.npy` shard (default: `1024`) |
+| `--no-loss-mask` | Disable saving the loss mask (train on all tokens) |
+| `--limit` | Maximum number of examples to preprocess (`0` = no limit) |
+| `--skip` | Number of examples to skip before processing |
+| `--split` | Dataset split to load (default: `train`) |
