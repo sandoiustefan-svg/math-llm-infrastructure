@@ -2,6 +2,7 @@
 *.csv
 *.parquet
 *.json
+*.jsonl
 
 # Data directories
 raw_data/
