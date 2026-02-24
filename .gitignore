@@ -3,12 +3,14 @@
 *.parquet
 *.json
 *.jsonl
+*.npy
 
 # Data directories
 raw_data/
 preprocessed_data/
 datasets/
 data/
+!src/data
 
 # Model weighta
 *.h5
