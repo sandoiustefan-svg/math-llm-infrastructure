@@ -26,7 +26,6 @@ python scripts/python/inspect_data.py --limit 3
 
 It has available three arguments:
 
-```markdown
 ### Available arguments
 
 | Argument  | Description |
