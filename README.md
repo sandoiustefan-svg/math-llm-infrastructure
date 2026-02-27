@@ -90,3 +90,30 @@ python scripts/python/preprocess_data.py \
 | `--limit` | Maximum number of examples to preprocess (`0` = no limit) |
 | `--skip` | Number of examples to skip before processing |
 | `--split` | Dataset split to load (default: `train`) |
+
+## Training (From Scratch – LLaMA Architecture)
+
+After preprocessing, you can train a LLaMA-style model **from scratch** using the packed shards.
+
+The training script:
+
+- Loads `manifest.json`
+- Builds a LLaMA model from scratch
+- Streams packed shards via `PackedShardDataset`
+- Applies masked causal language modeling loss
+- Supports mixed precision (`--fp16`)
+
+---
+
+### Run Training
+
+```bash
+python scripts/python/train.py \
+  --data-dir data/processed/openmathinstruct2 \
+  --tokenizer meta-llama/Llama-3.1-8B-Instruct \
+  --n-layers 12 \
+  --hidden-size 768 \
+  --n-heads 12 \
+  --batch-size 16 \
+  --steps 2000 \
+  --fp16
