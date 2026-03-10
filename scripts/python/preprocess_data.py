@@ -37,6 +37,7 @@ def main():
     ap.add_argument("--tokenizer", required=True, help="HF tokenizer name or local path (LLaMA tokenizer).")
     ap.add_argument("--seq-len", type=int, default=2048)
     ap.add_argument("--shard-num-seqs", type=int, default=1024)
+    ap.add_argument("--out-dir", default="data/processed/openmathinstruct2")
     ap.add_argument("--no-loss-mask", action="store_true")
     args = ap.parse_args()
 
@@ -47,7 +48,7 @@ def main():
         skip=args.skip,
     )
 
-    fmt_cfg = FormatConfig(include_final_answer=True, add_eos=True)
+    fmt_cfg = FormatConfig(include_final_answer=True)
 
     pack_cfg = PackConfig(
         tokenizer_name_or_path=args.tokenizer,

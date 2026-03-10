@@ -13,7 +13,6 @@ class FormatConfig:
         add_eos: Whether an EOS token should be added later in preprocessing.
     """
     include_final_answer: bool = True
-    add_eos: bool = True
 
 def format_openmathinstruct2_exmaple(ex: Dict[str, Any], cfg: FormatConfig) ->  Dict[str, str]:
     """

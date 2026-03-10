@@ -12,6 +12,14 @@ from transformers import AutoTokenizer
 from src.data.packed_dataset import PackedShardDataset
 from src.model.llama_model import LlamaModelConfig, build_llama
 
+import torch.distributed as dist
+
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.append(str(PROJECT_ROOT))
+
 
 def load_manifest(data_dir: str) -> dict:
     manifest_path = Path(data_dir) / "manifest.json"
@@ -94,7 +102,17 @@ def main():
     model.train()
 
     # Dataset
-    dataset = PackedShardDataset(args.data_dir)
+
+    # rank = dist.get_rank()
+    # world_size = dist.get_world_size()
+
+    dataset = PackedShardDataset(
+        args.data_dir,
+        shuffle=True,
+        seed=42,
+        rank=0,
+        world_size=1,
+    )
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
