@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import os
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -9,23 +13,34 @@ from torch.utils.data import DataLoader
 from src.data.packed_dataset import PackedShardDataset
 from src.model.llama_model import LlamaModelConfig, build_llama
 
+
 @dataclass
 class TrainConfig:
     data_dir: str
     tokenizer: str
+    output_dir: str = "outputs/training"
+
+    # Model
     n_layers: int = 8
     hidden_size: int = 512
     n_heads: int = 8
+
+    # Training
     batch_size: int = 8
     lr: float = 3e-4
     steps: int = 1000
     num_workers: int = 2
     fp16: bool = False
 
+    # Checkpointing
+    save_every: int = 500
+    log_every: int = 50
+
+
 def masked_causal_loss(
-        logits: torch.Tensor,
-        labels: torch.Tensor,
-        loss_mask: torch.Tensor | None,
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    loss_mask: torch.Tensor | None,
 ) -> torch.Tensor:
     loss_token = F.cross_entropy(
         logits.reshape(-1, logits.size(-1)),
@@ -39,18 +54,112 @@ def masked_causal_loss(
     loss_mask = loss_mask.to(loss_token.dtype)
     return (loss_token * loss_mask).sum() / loss_mask.sum().clamp_min(1.0)
 
-def load_manifest(data_dir: str) -> dict:
-    import json
-    from pathlib import Path
 
+def load_manifest(data_dir: str) -> dict:
     manifest_path = Path(data_dir) / "manifest.json"
     if not manifest_path.exists():
         raise FileNotFoundError(f"Missing manifest.json in {data_dir}")
     with open(manifest_path) as f:
         return json.load(f)
-    
+
+
+def save_checkpoint(model, optimizer, step, metrics, path):
+    os.makedirs(path, exist_ok=True)
+    model.save_pretrained(path)
+    torch.save({
+        "optimizer": optimizer.state_dict(),
+        "step": step,
+        "metrics": metrics,
+    }, os.path.join(path, "training_state.pt"))
+    print(f"  Checkpoint saved → {path}")
+
+
+def plot_metrics(metrics: dict, output_dir: str):
+    """Save training metric plots. Uses matplotlib if available, otherwise saves raw JSON."""
+    # Always save raw metrics
+    metrics_path = os.path.join(output_dir, "metrics.json")
+    with open(metrics_path, "w") as f:
+        json.dump(metrics, f, indent=2)
+    print(f"  Metrics saved → {metrics_path}")
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle("Training Metrics", fontsize=16, fontweight="bold")
+
+        # Loss curve
+        ax = axes[0, 0]
+        ax.plot(metrics["steps"], metrics["loss"], linewidth=0.8, alpha=0.4, label="raw")
+        # Smoothed loss (rolling average)
+        window = max(1, len(metrics["loss"]) // 50)
+        if len(metrics["loss"]) > window:
+            smoothed = [
+                sum(metrics["loss"][max(0, i - window):i + 1]) / len(metrics["loss"][max(0, i - window):i + 1])
+                for i in range(len(metrics["loss"]))
+            ]
+            ax.plot(metrics["steps"], smoothed, linewidth=2, color="red", label="smoothed")
+        ax.set_xlabel("Step")
+        ax.set_ylabel("Loss")
+        ax.set_title("Training Loss")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # Log-scale loss
+        ax = axes[0, 1]
+        ax.plot(metrics["steps"], metrics["loss"], linewidth=0.8, alpha=0.4)
+        if len(metrics["loss"]) > window:
+            ax.plot(metrics["steps"], smoothed, linewidth=2, color="red")
+        ax.set_yscale("log")
+        ax.set_xlabel("Step")
+        ax.set_ylabel("Loss (log)")
+        ax.set_title("Training Loss (Log Scale)")
+        ax.grid(True, alpha=0.3)
+
+        # Learning rate
+        ax = axes[1, 0]
+        ax.plot(metrics["steps"], metrics["lr"], linewidth=1.5, color="green")
+        ax.set_xlabel("Step")
+        ax.set_ylabel("Learning Rate")
+        ax.set_title("Learning Rate Schedule")
+        ax.grid(True, alpha=0.3)
+
+        # Throughput (tokens/sec)
+        ax = axes[1, 1]
+        if "tokens_per_sec" in metrics and metrics["tokens_per_sec"]:
+            ax.plot(metrics["steps"], metrics["tokens_per_sec"], linewidth=0.8, alpha=0.4)
+            if len(metrics["tokens_per_sec"]) > window:
+                smoothed_tps = [
+                    sum(metrics["tokens_per_sec"][max(0, i - window):i + 1])
+                    / len(metrics["tokens_per_sec"][max(0, i - window):i + 1])
+                    for i in range(len(metrics["tokens_per_sec"]))
+                ]
+                ax.plot(metrics["steps"], smoothed_tps, linewidth=2, color="orange")
+            ax.set_xlabel("Step")
+            ax.set_ylabel("Tokens/sec")
+            ax.set_title("Training Throughput")
+            ax.grid(True, alpha=0.3)
+        else:
+            ax.text(0.5, 0.5, "No throughput data", ha="center", va="center", transform=ax.transAxes)
+
+        plt.tight_layout()
+        plot_path = os.path.join(output_dir, "training_metrics.png")
+        fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Plots saved → {plot_path}")
+
+    except ImportError:
+        print("  matplotlib not available — skipping plots (metrics.json still saved)")
+
+
 def train(cfg: TrainConfig) -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Directories
+    checkpoint_dir = os.path.join(cfg.output_dir, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
     # Load manifest
     manifest = load_manifest(cfg.data_dir)
@@ -71,6 +180,9 @@ def train(cfg: TrainConfig) -> None:
     model.to(device)
     model.train()
 
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"Model parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
+
     # Dataset
     dataset = PackedShardDataset(
         cfg.data_dir,
@@ -89,7 +201,16 @@ def train(cfg: TrainConfig) -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
     scaler = torch.amp.GradScaler("cuda", enabled=(cfg.fp16 and device == "cuda"))
 
+    # Metrics tracking
+    metrics = {
+        "steps": [],
+        "loss": [],
+        "lr": [],
+        "tokens_per_sec": [],
+    }
+
     data_iter = iter(loader)
+    step_start = time.time()
 
     for step in range(cfg.steps):
         batch = next(data_iter)
@@ -117,7 +238,49 @@ def train(cfg: TrainConfig) -> None:
         scaler.step(optimizer)
         scaler.update()
 
-        if step % 50 == 0:
-            print(f"Step {step} | Loss {loss.item():.4f}")
+        # Track metrics
+        step_end = time.time()
+        tokens_in_batch = x.numel()
+        tokens_per_sec = tokens_in_batch / (step_end - step_start)
 
+        metrics["steps"].append(step)
+        metrics["loss"].append(loss.item())
+        metrics["lr"].append(optimizer.param_groups[0]["lr"])
+        metrics["tokens_per_sec"].append(tokens_per_sec)
+
+        step_start = time.time()
+
+        # Log
+        if step % cfg.log_every == 0:
+            print(
+                f"Step {step:>6d}/{cfg.steps} | "
+                f"Loss {loss.item():.4f} | "
+                f"LR {optimizer.param_groups[0]['lr']:.2e} | "
+                f"Tok/s {tokens_per_sec:,.0f}"
+            )
+
+        # Intermediate checkpoint
+        if cfg.save_every > 0 and step > 0 and step % cfg.save_every == 0:
+            save_checkpoint(
+                model, optimizer, step, metrics,
+                os.path.join(checkpoint_dir, f"step_{step}"),
+            )
+
+    # ── Final save ──
+    print("")
+    print("Saving final model...")
+    save_checkpoint(
+        model, optimizer, cfg.steps, metrics,
+        os.path.join(checkpoint_dir, "final"),
+    )
+
+    # ── Plot metrics ──
+    print("Generating training plots...")
+    plot_metrics(metrics, cfg.output_dir)
+
+    print("")
     print("Training complete.")
+    print(f"  Total steps   : {cfg.steps}")
+    print(f"  Final loss    : {metrics['loss'][-1]:.4f}")
+    print(f"  Checkpoints   : {checkpoint_dir}")
+    print(f"  Metrics       : {cfg.output_dir}")

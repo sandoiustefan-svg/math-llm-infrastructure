@@ -4,27 +4,32 @@
 # Usage:
 #   bash scripts/bash/run_pipeline.sh
 #   bash scripts/bash/run_pipeline.sh --debug   # small run for testing
+
 set -euo pipefail
 
-# Defaults
+# Defaults (full run — ~500M params)
 TOKENIZER="mistralai/Mistral-7B-v0.1"
 OUT_DIR="data/processed/openmathinstruct2"
+OUTPUT_DIR="outputs/training"
 SPLIT="train"
 LIMIT=0
 SKIP=0
 SEQ_LEN=1024
 SHARD_NUM_SEQS=256
 
-BATCH_SIZE=8
+BATCH_SIZE=32
 LR=3e-4
-STEPS=1000
-NUM_WORKERS=2
-N_LAYERS=8
-HIDDEN_SIZE=512
-N_HEADS=8
+STEPS=10000
+NUM_WORKERS=4
+N_LAYERS=24
+HIDDEN_SIZE=2048
+N_HEADS=16
+SAVE_EVERY=500
+LOG_EVERY=50
 
 NO_LOSS_MASK=false
 DEBUG=false
+FP16=false
 
 for arg in "$@"; do
   case $arg in
@@ -33,11 +38,23 @@ for arg in "$@"; do
       LIMIT=5000
       SHARD_NUM_SEQS=64
       OUT_DIR="data/processed/openmathinstruct2_debug"
+      OUTPUT_DIR="outputs/training_debug"
       STEPS=100
+      SAVE_EVERY=50
+      LOG_EVERY=10
+      N_LAYERS=8
+      HIDDEN_SIZE=512
+      N_HEADS=8
+      BATCH_SIZE=8
+      NUM_WORKERS=2
       shift
       ;;
     --no-loss-mask)
       NO_LOSS_MASK=true
+      shift
+      ;;
+    --fp16)
+      FP16=true
       shift
       ;;
     *)
@@ -52,14 +69,28 @@ if [ "$NO_LOSS_MASK" = true ]; then
   NO_LOSS_MASK_FLAG="--no-loss-mask"
 fi
 
+FP16_FLAG=""
+if [ "$FP16" = true ]; then
+  FP16_FLAG="--fp16"
+fi
+
 echo "============================================================"
 echo "PIPELINE CONFIG"
 echo "  tokenizer      : $TOKENIZER"
 echo "  out_dir        : $OUT_DIR"
+echo "  output_dir     : $OUTPUT_DIR"
 echo "  limit          : $LIMIT (0 = no limit)"
 echo "  seq_len        : $SEQ_LEN"
 echo "  shard_num_seqs : $SHARD_NUM_SEQS"
+echo "  n_layers       : $N_LAYERS"
+echo "  hidden_size    : $HIDDEN_SIZE"
+echo "  n_heads        : $N_HEADS"
+echo "  batch_size     : $BATCH_SIZE"
+echo "  lr             : $LR"
 echo "  steps          : $STEPS"
+echo "  save_every     : $SAVE_EVERY"
+echo "  log_every      : $LOG_EVERY"
+echo "  fp16           : $FP16"
 echo "  debug          : $DEBUG"
 echo "============================================================"
 
@@ -85,13 +116,17 @@ echo "[2/2] Starting training..."
 python scripts/python/train.py \
   --data-dir "$OUT_DIR" \
   --tokenizer "$TOKENIZER" \
+  --output-dir "$OUTPUT_DIR" \
   --n-layers "$N_LAYERS" \
   --hidden-size "$HIDDEN_SIZE" \
   --n-heads "$N_HEADS" \
   --batch-size "$BATCH_SIZE" \
   --lr "$LR" \
   --steps "$STEPS" \
-  --num-workers "$NUM_WORKERS"
+  --num-workers "$NUM_WORKERS" \
+  --save-every "$SAVE_EVERY" \
+  --log-every "$LOG_EVERY" \
+  $FP16_FLAG
 
 echo "[2/2] Training complete."
 echo "============================================================"
