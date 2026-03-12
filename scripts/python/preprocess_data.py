@@ -18,6 +18,7 @@ Example:
 
 import sys
 from pathlib import Path
+import os
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(PROJECT_ROOT))
@@ -69,3 +70,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    os._exit(0)

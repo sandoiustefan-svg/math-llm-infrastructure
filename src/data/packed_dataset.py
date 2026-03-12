@@ -107,7 +107,7 @@ class PackedShardDataset(IterableDataset):
         """
         self.epoch = epoch
 
-    def _get_shard_indicies(self) -> list[int]:
+    def _get_shard_indices(self) -> list[int]:
         """
         Compute which shard indices this worker+rank should process.
 
@@ -164,11 +164,11 @@ class PackedShardDataset(IterableDataset):
 
         for i in range(input_arr.shape[0]):
             sample = {
-                "input_ids": torch.from_numpy(input_arr[i]).long()
+                "input_ids": torch.from_numpy(input_arr[i].copy()).long()
             }
 
             if mask_arr is not None:
-                sample["loss_mask"] = torch.from_numpy(mask_arr[i]).long()
+                sample["loss_mask"] = torch.from_numpy(mask_arr[i].copy()).long()
 
             yield sample
 
