@@ -100,10 +100,10 @@ class OnlinePackedDataset(IterableDataset):
             formatted = format_openmathinstruct2_exmaple(ex, fmt_cfg)
 
             prompt_ids = tokenizer.encode(
-                formatted.prompt, add_special_tokens=False
+                formatted["prompt_text"], add_special_tokens=False
             )
             completion_ids = tokenizer.encode(
-                formatted.completion, add_special_tokens=False
+                formatted["completion_text"], add_special_tokens=False
             )
 
             if self.add_eos and tokenizer.eos_token_id is not None:
