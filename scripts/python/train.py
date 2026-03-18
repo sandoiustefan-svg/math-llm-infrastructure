@@ -10,12 +10,21 @@ from src.training.trainer import TrainConfig, train
 
 def main():
     ap = argparse.ArgumentParser(description="Train a LLaMA model from scratch.")
-    ap.add_argument("--data-dir", required=True)
     ap.add_argument("--tokenizer", required=True)
     ap.add_argument("--output-dir", default="outputs/training")
-    ap.add_argument("--n-layers", type=int, default=8)
-    ap.add_argument("--hidden-size", type=int, default=512)
-    ap.add_argument("--n-heads", type=int, default=8)
+
+    # Data source (pick one)
+    ap.add_argument("--data-dir", default="", help="Path to preprocessed shards (disk mode)")
+    ap.add_argument("--online", action="store_true", help="Stream from HF directly (no disk)")
+    ap.add_argument("--seq-len", type=int, default=1024)
+    ap.add_argument("--limit", type=int, default=0, help="0 = no limit (online mode only)")
+
+    # Model
+    ap.add_argument("--n-layers", type=int, default=24)
+    ap.add_argument("--hidden-size", type=int, default=2048)
+    ap.add_argument("--n-heads", type=int, default=16)
+
+    # Training
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--steps", type=int, default=1000)
@@ -23,12 +32,19 @@ def main():
     ap.add_argument("--fp16", action="store_true")
     ap.add_argument("--save-every", type=int, default=500)
     ap.add_argument("--log-every", type=int, default=50)
+
     args = ap.parse_args()
 
+    if not args.online and not args.data_dir:
+        ap.error("Either --data-dir or --online is required")
+
     cfg = TrainConfig(
-        data_dir=args.data_dir,
         tokenizer=args.tokenizer,
         output_dir=args.output_dir,
+        data_dir=args.data_dir,
+        online=args.online,
+        seq_len=args.seq_len,
+        limit=args.limit,
         n_layers=args.n_layers,
         hidden_size=args.hidden_size,
         n_heads=args.n_heads,

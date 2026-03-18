@@ -2,8 +2,10 @@
 # Full pipeline: preprocess OpenMathInstruct-2 then train from scratch.
 #
 # Usage:
-#   bash scripts/bash/run_pipeline.sh
-#   bash scripts/bash/run_pipeline.sh --debug   # small run for testing
+#   bash scripts/bash/run_pipeline.sh                    # full run, disk mode
+#   bash scripts/bash/run_pipeline.sh --debug            # small debug run
+#   bash scripts/bash/run_pipeline.sh --online           # stream from HF, no disk
+#   bash scripts/bash/run_pipeline.sh --debug --online   # debug + online
 
 set -euo pipefail
 
@@ -30,6 +32,7 @@ LOG_EVERY=50
 NO_LOSS_MASK=false
 DEBUG=false
 FP16=false
+ONLINE=false
 
 for arg in "$@"; do
   case $arg in
@@ -55,6 +58,10 @@ for arg in "$@"; do
       ;;
     --fp16)
       FP16=true
+      shift
+      ;;
+    --online)
+      ONLINE=true
       shift
       ;;
     *)
@@ -91,42 +98,73 @@ echo "  steps          : $STEPS"
 echo "  save_every     : $SAVE_EVERY"
 echo "  log_every      : $LOG_EVERY"
 echo "  fp16           : $FP16"
+echo "  online         : $ONLINE"
 echo "  debug          : $DEBUG"
 echo "============================================================"
 
-# Step 1: Preprocess (skip if already done)
-if [ -f "$OUT_DIR/manifest.json" ]; then
-  echo "[1/2] Preprocessed data found — skipping."
-else
-  echo "[1/2] Preprocessing..."
-  python scripts/python/preprocess_data.py \
+if [ "$ONLINE" = true ]; then
+  echo "[1/1] Training (online streaming)..."
+
+  LIMIT_FLAG=""
+  if [ "$LIMIT" -gt 0 ]; then
+    LIMIT_FLAG="--limit $LIMIT"
+  fi
+
+  python scripts/python/train.py \
     --tokenizer "$TOKENIZER" \
-    --split "$SPLIT" \
-    --limit "$LIMIT" \
-    --skip "$SKIP" \
+    --output-dir "$OUTPUT_DIR" \
+    --n-layers "$N_LAYERS" \
+    --hidden-size "$HIDDEN_SIZE" \
+    --n-heads "$N_HEADS" \
+    --batch-size "$BATCH_SIZE" \
+    --lr "$LR" \
+    --steps "$STEPS" \
+    --num-workers 0 \
+    --save-every "$SAVE_EVERY" \
+    --log-every "$LOG_EVERY" \
+    --online \
     --seq-len "$SEQ_LEN" \
-    --shard-num-seqs "$SHARD_NUM_SEQS" \
-    --out-dir "$OUT_DIR" \
-    $NO_LOSS_MASK_FLAG
-  echo "[1/2] Preprocessing complete."
+    $LIMIT_FLAG \
+    $FP16_FLAG
+
+else
+  # ── Disk mode: preprocess then train ──
+
+  # Step 1: Preprocess (skip if already done)
+  if [ -f "$OUT_DIR/manifest.json" ]; then
+    echo "[1/2] Preprocessed data found — skipping."
+  else
+    echo "[1/2] Preprocessing..."
+    python scripts/python/preprocess_data.py \
+      --tokenizer "$TOKENIZER" \
+      --split "$SPLIT" \
+      --limit "$LIMIT" \
+      --skip "$SKIP" \
+      --seq-len "$SEQ_LEN" \
+      --shard-num-seqs "$SHARD_NUM_SEQS" \
+      --out-dir "$OUT_DIR" \
+      $NO_LOSS_MASK_FLAG
+    echo "[1/2] Preprocessing complete."
+  fi
+
+  # Step 2: Train
+  echo "[2/2] Starting training..."
+  python scripts/python/train.py \
+    --data-dir "$OUT_DIR" \
+    --tokenizer "$TOKENIZER" \
+    --output-dir "$OUTPUT_DIR" \
+    --n-layers "$N_LAYERS" \
+    --hidden-size "$HIDDEN_SIZE" \
+    --n-heads "$N_HEADS" \
+    --batch-size "$BATCH_SIZE" \
+    --lr "$LR" \
+    --steps "$STEPS" \
+    --num-workers "$NUM_WORKERS" \
+    --save-every "$SAVE_EVERY" \
+    --log-every "$LOG_EVERY" \
+    $FP16_FLAG
 fi
 
-# Step 2: Train
-echo "[2/2] Starting training..."
-python scripts/python/train.py \
-  --data-dir "$OUT_DIR" \
-  --tokenizer "$TOKENIZER" \
-  --output-dir "$OUTPUT_DIR" \
-  --n-layers "$N_LAYERS" \
-  --hidden-size "$HIDDEN_SIZE" \
-  --n-heads "$N_HEADS" \
-  --batch-size "$BATCH_SIZE" \
-  --lr "$LR" \
-  --steps "$STEPS" \
-  --num-workers "$NUM_WORKERS" \
-  --save-every "$SAVE_EVERY" \
-  --log-every "$LOG_EVERY" \
-  $FP16_FLAG
-
-echo "[2/2] Training complete."
+echo "============================================================"
+echo "Training complete."
 echo "============================================================"
