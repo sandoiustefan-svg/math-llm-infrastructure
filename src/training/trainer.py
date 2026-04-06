@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,8 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from src.data.packed_dataset import PackedShardDataset
 from src.data.online_dataset import OnlinePackedDataset
@@ -41,6 +44,8 @@ class TrainConfig:
     # Checkpointing
     save_every: int = 500
     log_every: int = 50
+    resume: bool = False
+
 
 def _format_time(seconds: float) -> str:
     h = int(seconds // 3600)
@@ -77,13 +82,14 @@ def load_manifest(data_dir: str) -> dict:
         return json.load(f)
 
 
-def save_checkpoint(model, optimizer, step, metrics, path):
+def save_checkpoint(model, optimizer, step, metrics, samples_consumed, path):
     os.makedirs(path, exist_ok=True)
     model.save_pretrained(path)
     torch.save({
         "optimizer": optimizer.state_dict(),
         "step": step,
         "metrics": metrics,
+        "samples_consumed": samples_consumed,
     }, os.path.join(path, "training_state.pt"))
     print(f"  Checkpoint saved → {path}")
 
@@ -104,7 +110,6 @@ def plot_metrics(metrics: dict, output_dir: str):
 
         window = max(1, len(metrics["loss"]) // 50)
 
-        # Loss curve
         ax = axes[0, 0]
         ax.plot(metrics["steps"], metrics["loss"], linewidth=0.8, alpha=0.4, label="raw")
         if len(metrics["loss"]) > window:
@@ -120,7 +125,6 @@ def plot_metrics(metrics: dict, output_dir: str):
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-        # Log-scale loss
         ax = axes[0, 1]
         ax.plot(metrics["steps"], metrics["loss"], linewidth=0.8, alpha=0.4)
         if len(metrics["loss"]) > window:
@@ -131,7 +135,6 @@ def plot_metrics(metrics: dict, output_dir: str):
         ax.set_title("Training Loss (Log Scale)")
         ax.grid(True, alpha=0.3)
 
-        # Learning rate
         ax = axes[1, 0]
         ax.plot(metrics["steps"], metrics["lr"], linewidth=1.5, color="green")
         ax.set_xlabel("Step")
@@ -139,7 +142,6 @@ def plot_metrics(metrics: dict, output_dir: str):
         ax.set_title("Learning Rate Schedule")
         ax.grid(True, alpha=0.3)
 
-        # Throughput
         ax = axes[1, 1]
         if metrics.get("tokens_per_sec"):
             ax.plot(metrics["steps"], metrics["tokens_per_sec"], linewidth=0.8, alpha=0.4)
@@ -168,10 +170,58 @@ def plot_metrics(metrics: dict, output_dir: str):
 
 
 def train(cfg: TrainConfig) -> None:
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    if "LOCAL_RANK" in os.environ:
+        dist.init_process_group("nccl")
+        rank = dist.get_rank()
+        local_rank = int(os.environ["LOCAL_RANK"])
+        world_size = dist.get_world_size()
+        device = f"cuda:{local_rank}"
+    else:
+        rank = 0
+        local_rank = 0
+        world_size = 1
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
     checkpoint_dir = os.path.join(cfg.output_dir, "checkpoints")
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    if rank == 0:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+    metrics = {
+        "steps": [],
+        "loss": [],
+        "lr": [],
+        "tokens_per_sec": [],
+    }
+
+    start_step = 0
+    skip_samples = 0
+    resume_state_path = None
+
+    if cfg.resume:
+        try:
+            ckpt_dirs = sorted(
+                [d for d in os.listdir(checkpoint_dir) if d.startswith("step_")],
+                key=lambda x: int(x.split("_")[1])
+            )
+        except FileNotFoundError:
+            ckpt_dirs = []
+
+        if ckpt_dirs:
+            latest = os.path.join(checkpoint_dir, ckpt_dirs[-1])
+            state_path = os.path.join(latest, "training_state.pt")
+            if os.path.exists(state_path):
+                resume_state_path = latest
+                state = torch.load(state_path, map_location="cpu")
+                start_step = state["step"]
+                metrics = state.get("metrics", metrics)
+                skip_samples = state.get("samples_consumed", 0)
+
+                if rank == 0:
+                    print(f"Will resume from {latest} at step {start_step}, skipping {skip_samples} samples")
+        else:
+            if rank == 0:
+                print("No checkpoint found — starting from scratch.")
 
     if cfg.online:
         from transformers import AutoTokenizer
@@ -192,9 +242,10 @@ def train(cfg: TrainConfig) -> None:
             dataset,
             batch_size=cfg.batch_size,
             num_workers=0,
-            pin_memory=(device == "cuda"),
+            pin_memory=("cuda" in str(device)),
         )
-        print(f"Data mode: ONLINE (streaming from HF)")
+        if rank == 0:
+            print(f"Data mode: ONLINE (streaming from HF)")
     else:
         manifest = load_manifest(cfg.data_dir)
         seq_len = manifest["seq_len"]
@@ -205,16 +256,18 @@ def train(cfg: TrainConfig) -> None:
             cfg.data_dir,
             shuffle=True,
             seed=42,
-            rank=0,
-            world_size=1,
+            rank=rank,
+            world_size=world_size,
+            skip_samples=skip_samples,
         )
         loader = DataLoader(
             dataset,
             batch_size=cfg.batch_size,
             num_workers=cfg.num_workers,
-            pin_memory=(device == "cuda"),
+            pin_memory=("cuda" in str(device)),
         )
-        print(f"Data mode: DISK (shards from {cfg.data_dir})")
+        if rank == 0:
+            print(f"Data mode: DISK (shards from {cfg.data_dir})")
 
     model_cfg = LlamaModelConfig(
         vocab_size=vocab_size,
@@ -226,30 +279,47 @@ def train(cfg: TrainConfig) -> None:
 
     model = build_llama(model_cfg)
     model.to(device)
+
+    if world_size > 1:
+        model = DDP(model, device_ids=[local_rank])
+
     model.train()
 
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Model parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
+    if rank == 0:
+        print(f"Model parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
+        if world_size > 1:
+            print(f"DDP: {world_size} GPUs, effective batch size = {cfg.batch_size * world_size}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
-    scaler = torch.amp.GradScaler("cuda", enabled=(cfg.fp16 and device == "cuda"))
+    scaler = torch.amp.GradScaler("cuda", enabled=(cfg.fp16 and "cuda" in str(device)))
 
-    metrics = {
-        "steps": [],
-        "loss": [],
-        "lr": [],
-        "tokens_per_sec": [],
-    }
+    if resume_state_path is not None:
+        from transformers import LlamaForCausalLM
+        raw_model = model.module if world_size > 1 else model
+        loaded = LlamaForCausalLM.from_pretrained(resume_state_path)
+        raw_model.load_state_dict(loaded.state_dict())
+        del loaded
 
+        state = torch.load(
+            os.path.join(resume_state_path, "training_state.pt"),
+            map_location=device,
+        )
+        optimizer.load_state_dict(state["optimizer"])
+        del state
+
+        if rank == 0:
+            print(f"Resumed model and optimizer from step {start_step}")
+
+    samples_consumed = skip_samples
     data_iter = iter(loader)
     train_start = time.time()
     step_start = time.time()
 
-    for step in range(cfg.steps):
+    for step in range(start_step, cfg.steps):
         try:
             batch = next(data_iter)
         except StopIteration:
-            # Restart if dataset is exhausted (epoch boundary)
             data_iter = iter(loader)
             batch = next(data_iter)
 
@@ -267,14 +337,18 @@ def train(cfg: TrainConfig) -> None:
 
         optimizer.zero_grad(set_to_none=True)
 
-        with torch.amp.autocast("cuda", enabled=(cfg.fp16 and device == "cuda")):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=(cfg.fp16 and "cuda" in str(device))):
             outputs = model(input_ids=x)
             logits = outputs.logits
             loss = masked_causal_loss(logits, y, loss_mask)
 
         scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         scaler.step(optimizer)
         scaler.update()
+
+        samples_consumed += cfg.batch_size
 
         step_end = time.time()
         tokens_in_batch = x.numel()
@@ -287,10 +361,10 @@ def train(cfg: TrainConfig) -> None:
 
         step_start = time.time()
 
-        if step % cfg.log_every == 0:
+        if rank == 0 and step % cfg.log_every == 0:
             elapsed = time.time() - train_start
-            steps_done = step + 1
-            steps_left = cfg.steps - steps_done
+            steps_done = step - start_step + 1
+            steps_left = cfg.steps - step - 1
             time_per_step = elapsed / steps_done
             eta = steps_left * time_per_step
 
@@ -306,25 +380,37 @@ def train(cfg: TrainConfig) -> None:
                 f"ETA {eta_str}"
             )
 
-        if cfg.save_every > 0 and step > 0 and step % cfg.save_every == 0:
+        if rank == 0 and cfg.save_every > 0 and step > 0 and step % cfg.save_every == 0:
+            save_model = model.module if world_size > 1 else model
+            ckpt_path = os.path.join(checkpoint_dir, f"step_{step}")
             save_checkpoint(
-                model, optimizer, step, metrics,
-                os.path.join(checkpoint_dir, f"step_{step}"),
+                save_model, optimizer, step, metrics, samples_consumed, ckpt_path,
             )
 
-    print("")
-    print("Saving final model...")
-    save_checkpoint(
-        model, optimizer, cfg.steps, metrics,
-        os.path.join(checkpoint_dir, "final"),
-    )
+            prev_step = step - cfg.save_every
+            prev_path = os.path.join(checkpoint_dir, f"step_{prev_step}")
+            if os.path.exists(prev_path):
+                shutil.rmtree(prev_path)
+                print(f"  Deleted old checkpoint → {prev_path}")
 
-    print("Generating training plots...")
-    plot_metrics(metrics, cfg.output_dir)
+    if rank == 0:
+        print("")
+        print("Saving final model...")
+        save_model = model.module if world_size > 1 else model
+        save_checkpoint(
+            save_model, optimizer, cfg.steps, metrics, samples_consumed,
+            os.path.join(checkpoint_dir, "final"),
+        )
 
-    print("")
-    print("Training complete.")
-    print(f"  Total steps   : {cfg.steps}")
-    print(f"  Final loss    : {metrics['loss'][-1]:.4f}")
-    print(f"  Checkpoints   : {checkpoint_dir}")
-    print(f"  Metrics       : {cfg.output_dir}")
+        print("Generating training plots...")
+        plot_metrics(metrics, cfg.output_dir)
+
+        print("")
+        print("Training complete.")
+        print(f"  Total steps   : {cfg.steps}")
+        print(f"  Final loss    : {metrics['loss'][-1]:.4f}")
+        print(f"  Checkpoints   : {checkpoint_dir}")
+        print(f"  Metrics       : {cfg.output_dir}")
+
+    if world_size > 1:
+        dist.destroy_process_group()

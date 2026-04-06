@@ -20,6 +20,7 @@ class PackedShardDataset(IterableDataset):
         - DDP (shards split across ranks, no duplicates)
         - Shard-level shuffling with reproducible seeds
         - Epoch-aware shuffling (different order each epoch)
+        - Sample skipping for training resume
 
     Expected directory structure:
         data_dir/
@@ -36,12 +37,15 @@ class PackedShardDataset(IterableDataset):
         }
     """
 
-    def __init__(self, 
-                 data_dir: str,
-                 shuffle: bool = False,
-                 seed: int = 42,
-                 rank: int = 0,
-                 world_size: int = 1):
+    def __init__(
+        self,
+        data_dir: str,
+        shuffle: bool = False,
+        seed: int = 42,
+        rank: int = 0,
+        world_size: int = 1,
+        skip_samples: int = 0,
+    ):
         """
         Args:
             data_dir (str):
@@ -59,6 +63,11 @@ class PackedShardDataset(IterableDataset):
 
             world_size (int):
                 Total number of processes for DDP. 1 for single-GPU.
+
+            skip_samples (int):
+                Number of samples to skip before yielding. Used for
+                resuming training from a checkpoint without re-processing
+                already-seen data.
         """
         super().__init__()
 
@@ -68,6 +77,7 @@ class PackedShardDataset(IterableDataset):
         self.rank = rank
         self.world_size = world_size
         self.epoch = 0
+        self.skip_samples = skip_samples
 
         manifest_path = self.data_dir / "manifest.json"
         if not manifest_path.exists():
@@ -79,11 +89,10 @@ class PackedShardDataset(IterableDataset):
         self.seq_len = manifest["seq_len"]
         self.save_loss_mask = manifest["save_loss_mask"]
         self._packed_seq = manifest["packed_seqs"]
-        
 
         self.input_shards = sorted(self.data_dir.glob("input_ids_*.npy"))
         if not self.input_shards:
-            raise RuntimeError("No input shards files found.")
+            raise RuntimeError("No input shard files found.")
 
         if self.save_loss_mask:
             self.mask_shards = sorted(self.data_dir.glob("loss_mask_*.npy"))
@@ -116,23 +125,20 @@ class PackedShardDataset(IterableDataset):
         """
         num_shards = len(self.input_shards)
 
-        # Shuffle shard order (same order across all workers/ranks for correct splitting)
         if self.shuffle:
             rng = np.random.default_rng(self.seed + self.epoch)
             indices = rng.permutation(num_shards).tolist()
         else:
             indices = list(range(num_shards))
 
-        # Split across DDP ranks
-        indices = indices[self.rank::self.world_size]
+        indices = indices[self.rank :: self.world_size]
 
-        # Split across DataLoader workers
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
-            indices = indices[worker_info.id::worker_info.num_workers]
+            indices = indices[worker_info.id :: worker_info.num_workers]
 
         return indices
-    
+
     def _iter_shard(
         self,
         shard_path: Path,
@@ -174,17 +180,22 @@ class PackedShardDataset(IterableDataset):
 
     def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
         """
-        Iterate over all shard files sequentially.
+        Iterate over all shard files and yield individual token sequences.
 
-        This method streams shards one by one and yields individual
-        token sequences, making it suitable for large-scale training
-        without loading the full dataset into memory.
+        If skip_samples > 0, that many samples are silently consumed
+        before yielding begins. This enables resuming training from
+        a checkpoint without re-processing already-seen data.
 
         Yields:
             Dict[str, torch.Tensor]:
                 A single training sample of length `seq_len`.
         """
+        skipped = 0
         for idx in self._get_shard_indices():
             shard_path = self.input_shards[idx]
             mask_path = self.mask_shards[idx] if self.mask_shards is not None else None
-            yield from self._iter_shard(shard_path, mask_path)
+            for sample in self._iter_shard(shard_path, mask_path):
+                if skipped < self.skip_samples:
+                    skipped += 1
+                    continue
+                yield sample

@@ -13,7 +13,7 @@ def main():
     ap.add_argument("--tokenizer", required=True)
     ap.add_argument("--output-dir", default="outputs/training")
 
-    # Data source (pick one)
+    # Data source
     ap.add_argument("--data-dir", default="", help="Path to preprocessed shards (disk mode)")
     ap.add_argument("--online", action="store_true", help="Stream from HF directly (no disk)")
     ap.add_argument("--seq-len", type=int, default=1024)
@@ -32,6 +32,7 @@ def main():
     ap.add_argument("--fp16", action="store_true")
     ap.add_argument("--save-every", type=int, default=500)
     ap.add_argument("--log-every", type=int, default=50)
+    ap.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
 
     args = ap.parse_args()
 
@@ -55,6 +56,7 @@ def main():
         fp16=args.fp16,
         save_every=args.save_every,
         log_every=args.log_every,
+        resume=args.resume,
     )
 
     train(cfg)
