@@ -304,7 +304,7 @@ def train(cfg: TrainConfig) -> None:
     model.to(device)
 
     if world_size > 1:
-        model = DDP(model, device_ids=[local_rank])
+        model = DDP(model, device_ids=[local_rank], gradient_as_bucket_view=True)
 
     model.train()
 
