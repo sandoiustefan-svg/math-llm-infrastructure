@@ -280,7 +280,10 @@ def train(cfg: TrainConfig) -> None:
             print(f"Data mode: DISK (shards from {cfg.data_dir})")
 
     if cfg.pretrained_model:
-        model = AutoModelForCausalLM.from_pretrained(cfg.pretrained_model)
+        model = AutoModelForCausalLM.from_pretrained(
+            cfg.pretrained_model,
+            torch_dtype=torch.float16,
+        )
         # Use the pretrained model's own dimensions
         seq_len = model.config.max_position_embeddings
         vocab_size = model.config.vocab_size
