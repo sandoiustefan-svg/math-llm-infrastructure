@@ -19,7 +19,8 @@ def main():
     ap.add_argument("--seq-len", type=int, default=1024)
     ap.add_argument("--limit", type=int, default=0, help="0 = no limit (online mode only)")
 
-    # Model
+    # Model (ignored when --pretrained-model is set)
+    ap.add_argument("--pretrained-model", default="", help="HF model ID or local path for fine-tuning (skips scratch init)")
     ap.add_argument("--n-layers", type=int, default=24)
     ap.add_argument("--hidden-size", type=int, default=2048)
     ap.add_argument("--n-heads", type=int, default=16)
@@ -33,6 +34,7 @@ def main():
     ap.add_argument("--save-every", type=int, default=500)
     ap.add_argument("--log-every", type=int, default=50)
     ap.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
+    ap.add_argument("--seed", type=int, default=42, help="Random seed (use different seeds for ensemble members)")
 
     args = ap.parse_args()
 
@@ -41,6 +43,7 @@ def main():
 
     cfg = TrainConfig(
         tokenizer=args.tokenizer,
+        pretrained_model=args.pretrained_model,
         output_dir=args.output_dir,
         data_dir=args.data_dir,
         online=args.online,
@@ -57,6 +60,7 @@ def main():
         save_every=args.save_every,
         log_every=args.log_every,
         resume=args.resume,
+        seed=args.seed,
     )
 
     train(cfg)

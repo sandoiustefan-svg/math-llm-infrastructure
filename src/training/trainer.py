@@ -12,10 +12,12 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.data.packed_dataset import PackedShardDataset
 from src.data.online_dataset import OnlinePackedDataset
 from src.model.llama_model import LlamaModelConfig, build_llama
+from src.experiments.registry import ExperimentRegistry
 
 
 @dataclass
@@ -40,6 +42,12 @@ class TrainConfig:
     steps: int = 1000
     num_workers: int = 2
     fp16: bool = False
+
+    # Fine-tuning
+    pretrained_model: str = ""  # HF model ID or local path; empty = train from scratch
+
+    # Reproducibility
+    seed: int = 42
 
     # Checkpointing
     save_every: int = 500
@@ -183,6 +191,9 @@ def train(cfg: TrainConfig) -> None:
         world_size = 1
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    torch.manual_seed(cfg.seed)
+    torch.cuda.manual_seed_all(cfg.seed)
+
     checkpoint_dir = os.path.join(cfg.output_dir, "checkpoints")
     if rank == 0:
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -224,7 +235,6 @@ def train(cfg: TrainConfig) -> None:
                 print("No checkpoint found — starting from scratch.")
 
     if cfg.online:
-        from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer)
         vocab_size = len(tokenizer)
         seq_len = cfg.seq_len
@@ -255,7 +265,7 @@ def train(cfg: TrainConfig) -> None:
         dataset = PackedShardDataset(
             cfg.data_dir,
             shuffle=True,
-            seed=42,
+            seed=cfg.seed,
             rank=rank,
             world_size=world_size,
             skip_samples=skip_samples,
@@ -269,15 +279,23 @@ def train(cfg: TrainConfig) -> None:
         if rank == 0:
             print(f"Data mode: DISK (shards from {cfg.data_dir})")
 
-    model_cfg = LlamaModelConfig(
-        vocab_size=vocab_size,
-        max_position_embeddings=seq_len,
-        num_hidden_layers=cfg.n_layers,
-        hidden_size=cfg.hidden_size,
-        num_attention_heads=cfg.n_heads,
-    )
+    if cfg.pretrained_model:
+        model = AutoModelForCausalLM.from_pretrained(cfg.pretrained_model)
+        # Use the pretrained model's own dimensions
+        seq_len = model.config.max_position_embeddings
+        vocab_size = model.config.vocab_size
+        if rank == 0:
+            print(f"Loaded pretrained model: {cfg.pretrained_model}")
+    else:
+        model_cfg = LlamaModelConfig(
+            vocab_size=vocab_size,
+            max_position_embeddings=seq_len,
+            num_hidden_layers=cfg.n_layers,
+            hidden_size=cfg.hidden_size,
+            num_attention_heads=cfg.n_heads,
+        )
+        model = build_llama(model_cfg)
 
-    model = build_llama(model_cfg)
     model.to(device)
 
     if world_size > 1:
@@ -291,13 +309,21 @@ def train(cfg: TrainConfig) -> None:
         if world_size > 1:
             print(f"DDP: {world_size} GPUs, effective batch size = {cfg.batch_size * world_size}")
 
+    exp_id = None
+    if rank == 0:
+        try:
+            registry = ExperimentRegistry()
+            exp_id = registry.start_training(cfg, n_params)
+            print(f"  Experiment registered → {exp_id}")
+        except Exception as e:
+            print(f"  [registry] Warning: could not register experiment: {e}")
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
     scaler = torch.amp.GradScaler("cuda", enabled=(cfg.fp16 and "cuda" in str(device)))
 
     if resume_state_path is not None:
-        from transformers import LlamaForCausalLM
         raw_model = model.module if world_size > 1 else model
-        loaded = LlamaForCausalLM.from_pretrained(resume_state_path)
+        loaded = AutoModelForCausalLM.from_pretrained(resume_state_path)
         raw_model.load_state_dict(loaded.state_dict())
         del loaded
 
@@ -387,11 +413,12 @@ def train(cfg: TrainConfig) -> None:
                 save_model, optimizer, step, metrics, samples_consumed, ckpt_path,
             )
 
-            prev_step = step - cfg.save_every
-            prev_path = os.path.join(checkpoint_dir, f"step_{prev_step}")
-            if os.path.exists(prev_path):
-                shutil.rmtree(prev_path)
-                print(f"  Deleted old checkpoint → {prev_path}")
+            # Keep only the last 2 checkpoints (safety net for hard job kills)
+            prev2_step = step - 2 * cfg.save_every
+            prev2_path = os.path.join(checkpoint_dir, f"step_{prev2_step}")
+            if os.path.exists(prev2_path):
+                shutil.rmtree(prev2_path)
+                print(f"  Deleted old checkpoint → {prev2_path}")
 
     if rank == 0:
         print("")
@@ -411,6 +438,21 @@ def train(cfg: TrainConfig) -> None:
         print(f"  Final loss    : {metrics['loss'][-1]:.4f}")
         print(f"  Checkpoints   : {checkpoint_dir}")
         print(f"  Metrics       : {cfg.output_dir}")
+
+        if exp_id is not None:
+            try:
+                registry = ExperimentRegistry()
+                registry.complete_training(
+                    exp_id,
+                    final_loss=metrics["loss"][-1],
+                    steps=cfg.steps,
+                    samples_consumed=samples_consumed,
+                    checkpoint_path=os.path.join(checkpoint_dir, "final"),
+                    output_dir=cfg.output_dir,
+                )
+                print(f"  Experiment updated → {exp_id}")
+            except Exception as e:
+                print(f"  [registry] Warning: could not update experiment: {e}")
 
     if world_size > 1:
         dist.destroy_process_group()
