@@ -2,7 +2,7 @@
 #SBATCH --job-name=math-llm-finetune
 #SBATCH --time=04:00:00
 #SBATCH --partition=gpushort
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:a100:2
 #SBATCH --mem=64000
 #SBATCH --output=/home2/s5549329/math-llm-infrastructure/logs/finetune_%j.out
 #SBATCH --error=/home2/s5549329/math-llm-infrastructure/logs/finetune_%j.err
