@@ -346,8 +346,9 @@ def train(cfg: TrainConfig) -> None:
         try:
             batch = next(data_iter)
         except StopIteration:
-            data_iter = iter(loader)
-            batch = next(data_iter)
+            if rank == 0:
+                print("Data exhausted — ending training.")
+            break
 
         input_ids = batch["input_ids"].to(device, non_blocking=True)
 

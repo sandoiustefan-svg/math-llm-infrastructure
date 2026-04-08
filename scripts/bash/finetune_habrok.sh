@@ -9,6 +9,9 @@
 
 set -euo pipefail
 
+cd /scratch/s5549329/math-llm-infrastructure || exit 1
+mkdir -p logs
+
 module purge
 module load Python/3.10.4-GCCcore-11.3.0
 module load CUDA/12.2.0
@@ -16,18 +19,6 @@ module load cuDNN/8.9.2.26-CUDA-12.2.0
 
 export CUDA_HOME="${EBROOTCUDA}"
 export LD_LIBRARY_PATH="${EBROOTCUDA}/lib64:${EBROOTCUDNN}/lib64:${LD_LIBRARY_PATH:-}"
-
-# Self-resubmit before training starts so the next job is always queued,
-# even if this one is hard-killed near the end of the 4-hour window.
-sbatch "$0"
-
-cd /scratch/s5549329/math-llm-infrastructure || exit 1
-mkdir -p logs
-
-source .venv/bin/activate
-
-# export HF_TOKEN="hf_..."
-export HF_HOME=/scratch/s5549329/.cache/huggingface
 
 # Fine-tune a pretrained model on OpenMathInstruct-2.
 # For deep ensembles, launch 3 independent jobs with different --seed and --output-dir:
@@ -38,17 +29,47 @@ SEED=${SEED:-42}
 OUTDIR=${OUTDIR:-finetune_seed42}
 PRETRAINED=${PRETRAINED:-mistralai/Mistral-7B-v0.1}
 
-torchrun --nproc_per_node=2 scripts/python/train.py \
+FINAL_CKPT="/scratch/s5549329/outputs/${OUTDIR}/checkpoints/final"
+
+# Stop resubmitting once training has fully completed.
+if [ -d "${FINAL_CKPT}" ]; then
+    echo "Training already complete (${FINAL_CKPT} exists). Exiting."
+    exit 0
+fi
+
+# Resubmit now so the next job is queued in case this one hits the wall time.
+# Capture the job ID so we can cancel it if training fails.
+NEXT_JOB=$(sbatch --parsable \
+    --output=/scratch/s5549329/math-llm-infrastructure/logs/finetune_%j.out \
+    --error=/scratch/s5549329/math-llm-infrastructure/logs/finetune_%j.err \
+    --export=ALL,SEED=${SEED},OUTDIR=${OUTDIR},PRETRAINED=${PRETRAINED} \
+    "$0")
+echo "Queued next job: ${NEXT_JOB}"
+
+source .venv/bin/activate
+
+# export HF_TOKEN="hf_..."
+export HF_HOME=/scratch/s5549329/.cache/huggingface
+
+# Use a very high step count — training stops naturally when data is exhausted.
+if torchrun --nproc_per_node=2 scripts/python/train.py \
     --data-dir /scratch/s5549329/data/openmathinstruct2 \
     --pretrained-model ${PRETRAINED} \
     --tokenizer mistralai/Mistral-7B-v0.1 \
     --output-dir /scratch/s5549329/outputs/${OUTDIR} \
     --batch-size 2 \
     --lr 1e-5 \
-    --steps 50000 \
+    --steps 9999999 \
     --num-workers 4 \
     --save-every 1000 \
     --log-every 100 \
     --seed ${SEED} \
     --fp16 \
-    --resume
+    --resume; then
+    # Training finished cleanly — cancel the pending resubmission.
+    scancel "${NEXT_JOB}" 2>/dev/null && echo "Training complete. Cancelled pending job ${NEXT_JOB}."
+else
+    # Training errored — cancel the pending resubmission so we don't loop forever.
+    scancel "${NEXT_JOB}" 2>/dev/null && echo "Training failed. Cancelled pending job ${NEXT_JOB}. Fix the error and resubmit manually."
+    exit 1
+fi
