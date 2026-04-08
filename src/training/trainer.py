@@ -282,8 +282,10 @@ def train(cfg: TrainConfig) -> None:
     if cfg.pretrained_model:
         model = AutoModelForCausalLM.from_pretrained(
             cfg.pretrained_model,
-            torch_dtype=torch.float16,
+            dtype=torch.float16,
         )
+        model.config.use_cache = False
+        model.gradient_checkpointing_enable()
         # Use the pretrained model's own dimensions
         seq_len = model.config.max_position_embeddings
         vocab_size = model.config.vocab_size
