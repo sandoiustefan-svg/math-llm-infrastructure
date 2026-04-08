@@ -324,7 +324,10 @@ def train(cfg: TrainConfig) -> None:
             print(f"  [registry] Warning: could not register experiment: {e}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
-    scaler = torch.amp.GradScaler("cuda", enabled=(cfg.fp16 and "cuda" in str(device)))
+    # GradScaler expects fp32 gradients — disable it when fine-tuning a model
+    # that was loaded in fp16 (gradients will already be fp16).
+    use_scaler = cfg.fp16 and "cuda" in str(device) and not cfg.pretrained_model
+    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
 
     if resume_state_path is not None:
         raw_model = model.module if world_size > 1 else model
@@ -369,7 +372,7 @@ def train(cfg: TrainConfig) -> None:
 
         optimizer.zero_grad(set_to_none=True)
 
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=(cfg.fp16 and "cuda" in str(device))):
+        with torch.amp.autocast("cuda", dtype=torch.float16, enabled=(cfg.fp16 and "cuda" in str(device) and not cfg.pretrained_model)):
             outputs = model(input_ids=x)
             logits = outputs.logits
             loss = masked_causal_loss(logits, y, loss_mask)
