@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-cd /scratch/s5549329/math-llm-infrastructure || exit 1
+cd /home2/s5549329/math-llm-infrastructure || exit 1
 mkdir -p logs
 
 module purge
@@ -40,8 +40,8 @@ fi
 # Resubmit now so the next job is queued in case this one hits the wall time.
 # Capture the job ID so we can cancel it if training fails.
 NEXT_JOB=$(sbatch --parsable \
-    --output=/scratch/s5549329/math-llm-infrastructure/logs/finetune_%j.out \
-    --error=/scratch/s5549329/math-llm-infrastructure/logs/finetune_%j.err \
+    --output=/home2/s5549329/math-llm-infrastructure/logs/finetune_%j.out \
+    --error=/home2/s5549329/math-llm-infrastructure/logs/finetune_%j.err \
     --export=ALL,SEED=${SEED},OUTDIR=${OUTDIR},PRETRAINED=${PRETRAINED} \
     "$0")
 echo "Queued next job: ${NEXT_JOB}"
