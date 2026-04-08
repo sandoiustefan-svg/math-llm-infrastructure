@@ -34,12 +34,14 @@ SEED=${SEED:-42}
 OUTDIR=${OUTDIR:-finetune_seed42}
 PRETRAINED=${PRETRAINED:-mistralai/Mistral-7B-v0.1}
 
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 torchrun --nproc_per_node=2 scripts/python/train.py \
     --data-dir /scratch/s5549329/data/openmathinstruct2 \
     --pretrained-model ${PRETRAINED} \
     --tokenizer mistralai/Mistral-7B-v0.1 \
     --output-dir /scratch/s5549329/outputs/${OUTDIR} \
-    --batch-size 2 \
+    --batch-size 1 \
     --lr 1e-5 \
     --steps 9999999 \
     --num-workers 4 \
