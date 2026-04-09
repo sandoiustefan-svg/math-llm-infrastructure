@@ -285,10 +285,13 @@ def train(cfg: TrainConfig) -> None:
             world_size=world_size,
             skip_samples=skip_samples,
         )
+        # num_workers > 0 causes SIGSEGV under DDP because DataLoader forks
+        # after CUDA is initialised — safe to use workers only in single-GPU mode.
+        safe_num_workers = 0 if world_size > 1 else cfg.num_workers
         loader = DataLoader(
             dataset,
             batch_size=cfg.batch_size,
-            num_workers=cfg.num_workers,
+            num_workers=safe_num_workers,
             pin_memory=("cuda" in str(device)),
         )
         if rank == 0:
@@ -297,7 +300,7 @@ def train(cfg: TrainConfig) -> None:
     if cfg.pretrained_model:
         model = AutoModelForCausalLM.from_pretrained(
             cfg.pretrained_model,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
         )
         # Use the pretrained model's own dimensions
@@ -356,7 +359,7 @@ def train(cfg: TrainConfig) -> None:
         raw_model = model.module if world_size > 1 else model
         loaded = AutoModelForCausalLM.from_pretrained(
             resume_state_path,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
         )
         raw_model.load_state_dict(loaded.state_dict())
