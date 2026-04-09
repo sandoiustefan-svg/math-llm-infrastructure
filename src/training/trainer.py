@@ -41,7 +41,10 @@ class TrainConfig:
     lr: float = 3e-4
     steps: int = 1000
     num_workers: int = 2
-    fp16: bool = False
+    fp16: bool = False   # float16 + GradScaler
+    bf16: bool = False   # bfloat16, no GradScaler (preferred on A100)
+    warmup_steps: int = 2000
+    grad_accum_steps: int = 1
 
     # Fine-tuning
     pretrained_model: str = ""  # HF model ID or local path; empty = train from scratch
@@ -53,6 +56,15 @@ class TrainConfig:
     save_every: int = 500
     log_every: int = 50
     resume: bool = False
+
+
+def _lr_lambda(step: int, warmup_steps: int, total_steps: int) -> float:
+    """Linear warmup then cosine decay."""
+    if step < warmup_steps:
+        return step / max(1, warmup_steps)
+    progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+    import math
+    return 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
 def _format_time(seconds: float) -> str:
@@ -323,7 +335,15 @@ def train(cfg: TrainConfig) -> None:
             print(f"  [registry] Warning: could not register experiment: {e}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
-    scaler = torch.amp.GradScaler("cuda", enabled=(cfg.fp16 and "cuda" in str(device)))
+    # GradScaler only for fp16 (bf16 has wide dynamic range and doesn't need it)
+    use_fp16 = cfg.fp16 and not cfg.bf16 and "cuda" in str(device)
+    use_bf16 = cfg.bf16 and "cuda" in str(device)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_fp16)
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lambda step: _lr_lambda(step + start_step, cfg.warmup_steps, cfg.steps),
+    )
 
     if resume_state_path is not None:
         raw_model = model.module if world_size > 1 else model
@@ -370,18 +390,27 @@ def train(cfg: TrainConfig) -> None:
         if loss_mask is not None:
             loss_mask = loss_mask[:, 1:]
 
-        optimizer.zero_grad(set_to_none=True)
+        is_accum_step = (step % cfg.grad_accum_steps != 0)
 
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=(cfg.fp16 and "cuda" in str(device))):
+        if not is_accum_step:
+            optimizer.zero_grad(set_to_none=True)
+
+        amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
+        amp_enabled = use_fp16 or use_bf16
+        with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=amp_enabled):
             outputs = model(input_ids=x)
             logits = outputs.logits
             loss = masked_causal_loss(logits, y, loss_mask)
+            loss = loss / cfg.grad_accum_steps
 
         scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        scaler.step(optimizer)
-        scaler.update()
+
+        if not is_accum_step:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
 
         samples_consumed += cfg.batch_size
 
@@ -390,8 +419,8 @@ def train(cfg: TrainConfig) -> None:
         tokens_per_sec = tokens_in_batch / (step_end - step_start)
 
         metrics["steps"].append(step)
-        metrics["loss"].append(loss.item())
-        metrics["lr"].append(optimizer.param_groups[0]["lr"])
+        metrics["loss"].append((loss * cfg.grad_accum_steps).item())
+        metrics["lr"].append(scheduler.get_last_lr()[0])
         metrics["tokens_per_sec"].append(tokens_per_sec)
 
         step_start = time.time()
@@ -408,8 +437,8 @@ def train(cfg: TrainConfig) -> None:
 
             print(
                 f"Step {step:>6d}/{cfg.steps} | "
-                f"Loss {loss.item():.4f} | "
-                f"LR {optimizer.param_groups[0]['lr']:.2e} | "
+                f"Loss {(loss * cfg.grad_accum_steps).item():.4f} | "
+                f"LR {scheduler.get_last_lr()[0]:.2e} | "
                 f"Tok/s {tokens_per_sec:,.0f} | "
                 f"Elapsed {elapsed_str} | "
                 f"ETA {eta_str}"

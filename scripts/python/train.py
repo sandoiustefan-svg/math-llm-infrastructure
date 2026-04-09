@@ -30,7 +30,10 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--steps", type=int, default=1000)
     ap.add_argument("--num-workers", type=int, default=2)
-    ap.add_argument("--fp16", action="store_true")
+    ap.add_argument("--fp16", action="store_true", help="float16 mixed precision + GradScaler")
+    ap.add_argument("--bf16", action="store_true", help="bfloat16 mixed precision (preferred on A100, no GradScaler)")
+    ap.add_argument("--warmup-steps", type=int, default=2000, help="Linear LR warmup steps")
+    ap.add_argument("--grad-accum-steps", type=int, default=1, help="Gradient accumulation steps")
     ap.add_argument("--save-every", type=int, default=500)
     ap.add_argument("--log-every", type=int, default=50)
     ap.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
@@ -57,6 +60,9 @@ def main():
         steps=args.steps,
         num_workers=args.num_workers,
         fp16=args.fp16,
+        bf16=args.bf16,
+        warmup_steps=args.warmup_steps,
+        grad_accum_steps=args.grad_accum_steps,
         save_every=args.save_every,
         log_every=args.log_every,
         resume=args.resume,

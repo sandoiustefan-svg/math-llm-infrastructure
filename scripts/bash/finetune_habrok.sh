@@ -2,7 +2,7 @@
 #SBATCH --job-name=math-llm-finetune
 #SBATCH --time=04:00:00
 #SBATCH --partition=gpushort
-#SBATCH --gres=gpu:a100:2
+#SBATCH --gres=gpu:a100:4
 #SBATCH --mem=64000
 #SBATCH --output=/home2/s5549329/math-llm-infrastructure/logs/finetune_%j.out
 #SBATCH --error=/home2/s5549329/math-llm-infrastructure/logs/finetune_%j.err
@@ -22,6 +22,10 @@ export LD_LIBRARY_PATH="${EBROOTCUDA}/lib64:${EBROOTCUDNN}/lib64:${LD_LIBRARY_PA
 
 source .venv/bin/activate
 
+# Self-resubmit before training starts so the next job is always queued,
+# even if this one is hard-killed near the end of the 4-hour window.
+sbatch --export=SEED=${SEED:-42},OUTDIR=${OUTDIR:-finetune_seed42},PRETRAINED=${PRETRAINED:-meta-llama/Llama-3.2-1B} "$0"
+
 export HF_HOME=/scratch/s5549329/.cache/huggingface
 
 # For deep ensembles, launch 3 independent jobs with different --seed and --output-dir:
@@ -37,7 +41,7 @@ PRETRAINED=${PRETRAINED:-meta-llama/Llama-3.2-1B}
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-torchrun --nproc_per_node=2 scripts/python/train.py \
+torchrun --nproc_per_node=4 scripts/python/train.py \
     --data-dir /scratch/s5549329/data/openmathinstruct2 \
     --pretrained-model ${PRETRAINED} \
     --tokenizer mistralai/Mistral-7B-v0.1 \
@@ -49,5 +53,5 @@ torchrun --nproc_per_node=2 scripts/python/train.py \
     --save-every 1000 \
     --log-every 100 \
     --seed ${SEED} \
-    --fp16 \
+    --bf16 \
     --resume

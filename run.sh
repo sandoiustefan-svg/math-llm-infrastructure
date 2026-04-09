@@ -6,7 +6,6 @@ source .venv/bin/activate
 mkdir -p logs
 
 export CUDA_VISIBLE_DEVICES=0,1
-export HF_TOKEN="hf_..."
 
 TOKENIZER="mistralai/Mistral-7B-v0.1"
 OUT_DIR="data/processed/openmathinstruct2"
