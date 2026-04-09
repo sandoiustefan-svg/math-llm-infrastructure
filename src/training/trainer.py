@@ -115,6 +115,39 @@ def save_checkpoint(model, optimizer, step, metrics, samples_consumed, path, exp
     print(f"  Checkpoint saved → {path}")
 
 
+def plot_loss_curve(metrics: dict, path: str) -> None:
+    """Save a simple loss-only PNG, overwriting on each call."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        steps = metrics["steps"]
+        loss  = metrics["loss"]
+        window = max(1, len(loss) // 50)
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(steps, loss, linewidth=0.8, alpha=0.4, label="raw")
+        if len(loss) > window:
+            smoothed = [
+                sum(loss[max(0, i - window):i + 1]) / len(loss[max(0, i - window):i + 1])
+                for i in range(len(loss))
+            ]
+            ax.plot(steps, smoothed, linewidth=2, color="red", label="smoothed")
+        ax.set_xlabel("Step")
+        ax.set_ylabel("Loss")
+        ax.set_title(f"Training Loss (step {steps[-1] if steps else 0})")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Loss curve saved → {path}")
+    except ImportError:
+        pass
+
+
 def plot_metrics(metrics: dict, output_dir: str):
     metrics_path = os.path.join(output_dir, "metrics.json")
     with open(metrics_path, "w") as f:
@@ -460,6 +493,8 @@ def train(cfg: TrainConfig) -> None:
             save_checkpoint(
                 save_model, optimizer, step, metrics, samples_consumed, ckpt_path, exp_id=exp_id,
             )
+            plot_metrics(metrics, cfg.output_dir)  # overrides training_metrics.png each checkpoint
+            plot_loss_curve(metrics, f"/home2/s5549329/math-llm-infrastructure/outputs/loss_curve_{os.path.basename(cfg.output_dir)}.png")
 
             # Keep only the last 2 checkpoints (safety net for hard job kills)
             prev2_step = step - 2 * cfg.save_every
@@ -479,6 +514,7 @@ def train(cfg: TrainConfig) -> None:
 
         print("Generating training plots...")
         plot_metrics(metrics, cfg.output_dir)
+        plot_loss_curve(metrics, "/home2/s5549329/math-llm-infrastructure/outputs/loss_curve.png")
 
         print("")
         print("Training complete.")

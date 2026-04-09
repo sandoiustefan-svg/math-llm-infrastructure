@@ -22,10 +22,6 @@ export LD_LIBRARY_PATH="${EBROOTCUDA}/lib64:${EBROOTCUDNN}/lib64:${LD_LIBRARY_PA
 
 source .venv/bin/activate
 
-# Self-resubmit before training starts so the next job is always queued,
-# even if this one is hard-killed near the end of the 4-hour window.
-sbatch --export=SEED=${SEED:-42},OUTDIR=${OUTDIR:-finetune_seed42},PRETRAINED=${PRETRAINED:-meta-llama/Llama-3.2-1B} "$0"
-
 export HF_HOME=/scratch/s5549329/.cache/huggingface
 # Read HF token from the standard location so gated repos (Llama-3.2-1B) are accessible.
 # Store your token with: echo "hf_..." > ~/.cache/huggingface/token && chmod 600 ~/.cache/huggingface/token
@@ -33,16 +29,33 @@ if [[ -f "${HOME}/.cache/huggingface/token" ]]; then
     export HF_TOKEN=$(cat "${HOME}/.cache/huggingface/token")
 fi
 
-# For deep ensembles, launch 3 independent jobs with different --seed and --output-dir:
-#   sbatch --export=SEED=42,OUTDIR=finetune_seed42 scripts/bash/finetune_habrok.sh
-#   sbatch --export=SEED=43,OUTDIR=finetune_seed43 scripts/bash/finetune_habrok.sh
-#   sbatch --export=SEED=44,OUTDIR=finetune_seed44 scripts/bash/finetune_habrok.sh
+# Configurable via --export when submitting:
+#   SEED      — random seed (default 42); use different seeds for ensemble members
+#   OUTDIR    — output subdirectory under /scratch/.../outputs/
+#   PRETRAINED — HF model ID or local path
+#   STEPS     — total training steps (default 5000 for an initial loss check;
+#               increase and resubmit with --resume to continue)
 #
-# To resume a previous run, resubmit the same command — --resume picks up from
-# the latest checkpoint and continues from where the data left off.
+# Initial probe (check loss curve, then resume with more steps):
+#   sbatch --export=SEED=42,OUTDIR=finetune_seed42,STEPS=5000 scripts/bash/finetune_habrok.sh
+#
+# Resume with more steps after inspecting the plot:
+#   sbatch --export=SEED=42,OUTDIR=finetune_seed42,STEPS=50000 scripts/bash/finetune_habrok.sh
+#
+# For deep ensembles, launch 3 seeds in parallel:
+#   sbatch --export=SEED=42,OUTDIR=finetune_seed42,STEPS=5000 scripts/bash/finetune_habrok.sh
+#   sbatch --export=SEED=43,OUTDIR=finetune_seed43,STEPS=5000 scripts/bash/finetune_habrok.sh
+#   sbatch --export=SEED=44,OUTDIR=finetune_seed44,STEPS=5000 scripts/bash/finetune_habrok.sh
 SEED=${SEED:-42}
 OUTDIR=${OUTDIR:-finetune_seed42}
 PRETRAINED=${PRETRAINED:-meta-llama/Llama-3.2-1B}
+STEPS=${STEPS:-5000}
+
+# Self-resubmit only when running open-ended (STEPS >= 50000) so short probe
+# jobs don't keep requeueing indefinitely.
+if [[ ${STEPS} -ge 50000 ]]; then
+    sbatch --export=SEED=${SEED},OUTDIR=${OUTDIR},PRETRAINED=${PRETRAINED},STEPS=${STEPS} "$0"
+fi
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
@@ -58,7 +71,7 @@ torchrun --nproc_per_node=4 scripts/python/train.py \
     --output-dir /scratch/s5549329/outputs/${OUTDIR} \
     --batch-size 1 \
     --lr 1e-5 \
-    --steps 9999999 \
+    --steps ${STEPS} \
     --num-workers 4 \
     --save-every 1000 \
     --log-every 100 \
