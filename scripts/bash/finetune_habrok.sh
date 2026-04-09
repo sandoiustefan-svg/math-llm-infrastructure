@@ -46,6 +46,11 @@ PRETRAINED=${PRETRAINED:-meta-llama/Llama-3.2-1B}
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# Disable NVLink peer-to-peer and InfiniBand — Habrok A100s are PCIe-connected and
+# NCCL's P2P probe segfaults when the topology doesn't support it.
+export NCCL_P2P_DISABLE=1
+export NCCL_IB_DISABLE=1
+
 torchrun --nproc_per_node=4 scripts/python/train.py \
     --data-dir /scratch/s5549329/data/openmathinstruct2 \
     --pretrained-model ${PRETRAINED} \

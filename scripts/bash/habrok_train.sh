@@ -29,6 +29,11 @@ source .venv/bin/activate
 export HF_HOME=/scratch/s5549329/.cache/huggingface
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# Disable NVLink peer-to-peer and InfiniBand — Habrok A100s are PCIe-connected and
+# NCCL's P2P probe segfaults when the topology doesn't support it.
+export NCCL_P2P_DISABLE=1
+export NCCL_IB_DISABLE=1
+
 # Architecture: ~1B params (16L / 2048H / 16heads)
 # Previous run (exp_001): 16L/1536H/12heads ~650M, fp16+bf16 conflict, no warmup → loss stuck at 5.3
 # This run: same data, fixed precision (bf16), warmup + cosine decay, grad accumulation
