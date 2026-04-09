@@ -282,6 +282,8 @@ def train(cfg: TrainConfig) -> None:
     if cfg.pretrained_model:
         model = AutoModelForCausalLM.from_pretrained(
             cfg.pretrained_model,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
         )
         # Use the pretrained model's own dimensions
         seq_len = model.config.max_position_embeddings
@@ -325,7 +327,11 @@ def train(cfg: TrainConfig) -> None:
 
     if resume_state_path is not None:
         raw_model = model.module if world_size > 1 else model
-        loaded = AutoModelForCausalLM.from_pretrained(resume_state_path)
+        loaded = AutoModelForCausalLM.from_pretrained(
+            resume_state_path,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+        )
         raw_model.load_state_dict(loaded.state_dict())
         del loaded
 

@@ -33,7 +33,7 @@ export HF_HOME=/scratch/s5549329/.cache/huggingface
 # the latest checkpoint and continues from where the data left off.
 SEED=${SEED:-42}
 OUTDIR=${OUTDIR:-finetune_seed42}
-PRETRAINED=${PRETRAINED:-mistralai/Mistral-7B-v0.1}
+PRETRAINED=${PRETRAINED:-meta-llama/Llama-3.2-1B}
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
