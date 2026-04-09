@@ -408,6 +408,7 @@ def train(cfg: TrainConfig) -> None:
         if rank == 0:
             print(f"Resumed model and optimizer from step {start_step}")
 
+    best_loss = float("inf")
     samples_consumed = skip_samples
     data_iter = iter(loader)
     train_start = time.time()
@@ -495,6 +496,15 @@ def train(cfg: TrainConfig) -> None:
             )
             plot_metrics(metrics, cfg.output_dir)  # overrides training_metrics.png each checkpoint
             plot_loss_curve(metrics, f"/home2/s5549329/math-llm-infrastructure/outputs/loss_curve_{os.path.basename(cfg.output_dir)}.png")
+
+            # Save best checkpoint based on average loss over the last save_every steps
+            window = min(cfg.save_every, len(metrics["loss"]))
+            recent_loss = sum(metrics["loss"][-window:]) / window
+            if recent_loss < best_loss:
+                best_loss = recent_loss
+                best_path = os.path.join(checkpoint_dir, "best")
+                save_model.save_pretrained(best_path)
+                print(f"  Best checkpoint updated → {best_path} (avg loss {best_loss:.4f})")
 
             # Keep only the last 2 checkpoints (safety net for hard job kills)
             prev2_step = step - 2 * cfg.save_every
