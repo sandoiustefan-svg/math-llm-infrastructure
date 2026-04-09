@@ -27,6 +27,11 @@ source .venv/bin/activate
 sbatch --export=SEED=${SEED:-42},OUTDIR=${OUTDIR:-finetune_seed42},PRETRAINED=${PRETRAINED:-meta-llama/Llama-3.2-1B} "$0"
 
 export HF_HOME=/scratch/s5549329/.cache/huggingface
+# Read HF token from the standard location so gated repos (Llama-3.2-1B) are accessible.
+# Store your token with: echo "hf_..." > ~/.cache/huggingface/token && chmod 600 ~/.cache/huggingface/token
+if [[ -f "${HOME}/.cache/huggingface/token" ]]; then
+    export HF_TOKEN=$(cat "${HOME}/.cache/huggingface/token")
+fi
 
 # For deep ensembles, launch 3 independent jobs with different --seed and --output-dir:
 #   sbatch --export=SEED=42,OUTDIR=finetune_seed42 scripts/bash/finetune_habrok.sh

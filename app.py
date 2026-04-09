@@ -222,15 +222,33 @@ def render_uq(result: dict, method: str) -> None:
         with col_metrics:
             c1, c2, c3 = st.columns(3)
             with c1:
-                st.markdown(f'<div class="uq-label">Confidence</div><div class="uq-value {conf_class}">{confidence*100:.1f}%</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="uq-label">Answer confidence</div><div class="uq-value {conf_class}">{confidence*100:.1f}%</div>', unsafe_allow_html=True)
             with c2:
                 st.markdown(f'<div class="uq-label">Entropy</div><div class="uq-value">{entropy:.3f} bits</div>', unsafe_allow_html=True)
             with c3:
-                st.markdown(f'<div class="uq-label">Token perplexity</div><div class="uq-value">{perplexity:.2f}</div>', unsafe_allow_html=True)
+                method_label = f"MC Dropout ({n} passes)" if method == "mc_dropout" else f"Ensemble ({n} members)"
+                st.markdown(f'<div class="uq-label">{method_label}</div><div class="uq-value">{votes}/{n} agree</div>', unsafe_allow_html=True)
 
-            st.markdown("")
-            method_label = f"MC Dropout ({n} passes)" if method == "mc_dropout" else f"Ensemble ({n} members)"
-            st.markdown(f'<div class="uq-label">{method_label}</div><div class="uq-value">{votes}/{n} agree on majority answer</div>', unsafe_allow_html=True)
+        # Token-level confidence comparison table
+        st.markdown("**Token-level confidence measures**")
+        measures = [
+            ("Full sequence", "full_sequence_mean_confidence", "full_sequence_perplexity"),
+            ("Answer span only", "answer_span_mean_confidence", "answer_span_perplexity"),
+            ("Numeric tokens only", "numeric_mean_confidence", "numeric_perplexity"),
+        ]
+        cols = st.columns(3)
+        for col, (label, conf_key, ppl_key) in zip(cols, measures):
+            conf_val = result.get(conf_key, float("nan"))
+            ppl_val  = result.get(ppl_key, float("nan"))
+            conf_str = f"{conf_val*100:.1f}%" if conf_val == conf_val else "n/a"
+            ppl_str  = f"{ppl_val:.2f}"       if ppl_val == ppl_val  else "n/a"
+            with col:
+                st.markdown(
+                    f'<div class="uq-label">{label}</div>'
+                    f'<div class="uq-value">conf: {conf_str}</div>'
+                    f'<div style="color:#a6adc8;font-size:0.8rem">ppl: {ppl_str}</div>',
+                    unsafe_allow_html=True,
+                )
 
         # Answer distribution bar
         st.markdown("**Answer distribution across passes**")

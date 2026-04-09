@@ -6,7 +6,8 @@ from typing import Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.uq.metrics import answer_entropy, token_probability_confidence
+import math
+from src.uq.metrics import answer_entropy, answers_are_equal, token_probability_confidence
 
 
 @dataclass
@@ -116,16 +117,16 @@ class EnsembleEvaluator:
             confidence = counts[majority] / len(answers)
             entropy = answer_entropy(answers)
 
-            # Average token confidence across ensemble members
             member_confs = [per_model_token_confs[m][i] for m in range(len(self.cfg.model_paths))]
-            avg_token_conf = sum(c["mean_confidence"] for c in member_confs) / len(member_confs)
-            avg_perplexity = sum(c["perplexity"] for c in member_confs) / len(member_confs)
-            avg_min_prob = sum(c["min_token_prob"] for c in member_confs) / len(member_confs)
+
+            def _avg(key):
+                vals = [c[key] for c in member_confs if not math.isnan(c.get(key, float("nan")))]
+                return round(sum(vals) / len(vals), 6) if vals else float("nan")
 
             expected = item.get("expected_answer")
             correct: Optional[bool] = None
             if expected is not None:
-                correct = majority.strip() == str(expected).strip()
+                correct = answers_are_equal(majority, str(expected))
 
             results.append({
                 "problem": item["problem"],
@@ -133,10 +134,34 @@ class EnsembleEvaluator:
                 "majority_answer": majority,
                 "confidence": confidence,
                 "entropy": entropy,
-                "token_mean_confidence": round(avg_token_conf, 6),
-                "token_perplexity": round(avg_perplexity, 4),
-                "token_min_prob": round(avg_min_prob, 6),
                 "correct": correct,
+                # Full sequence (baseline — inflated by glue words)
+                "full_sequence_mean_confidence": _avg("full_sequence_mean_confidence"),
+                "full_sequence_perplexity":      _avg("full_sequence_perplexity"),
+                "full_sequence_min_token_prob":  _avg("full_sequence_min_token_prob"),
+                "full_sequence_std_token_prob":  _avg("full_sequence_std_token_prob"),
+                # Answer span only (tokens after ### Final Answer:)
+                "answer_span_mean_confidence":   _avg("answer_span_mean_confidence"),
+                "answer_span_perplexity":        _avg("answer_span_perplexity"),
+                "answer_span_min_token_prob":    _avg("answer_span_min_token_prob"),
+                "answer_span_std_token_prob":    _avg("answer_span_std_token_prob"),
+                # Numeric tokens — full sequence (all digit appearances)
+                "numeric_mean_confidence":       _avg("numeric_mean_confidence"),
+                "numeric_perplexity":            _avg("numeric_perplexity"),
+                "numeric_min_token_prob":        _avg("numeric_min_token_prob"),
+                "numeric_std_token_prob":        _avg("numeric_std_token_prob"),
+                # Numeric tokens — answer span only
+                "numeric_span_mean_confidence":  _avg("numeric_span_mean_confidence"),
+                "numeric_span_perplexity":       _avg("numeric_span_perplexity"),
+                "numeric_span_min_token_prob":   _avg("numeric_span_min_token_prob"),
+                "numeric_span_std_token_prob":   _avg("numeric_span_std_token_prob"),
+                # Position-weighted token probability (Metric 6)
+                "weighted_mean_confidence":      _avg("weighted_mean_confidence"),
+                "weighted_perplexity":           _avg("weighted_perplexity"),
+                # Legacy key kept for backwards compatibility
+                "token_mean_confidence":         _avg("full_sequence_mean_confidence"),
+                "token_perplexity":              _avg("full_sequence_perplexity"),
+                "token_min_prob":                _avg("full_sequence_min_token_prob"),
             })
 
         return results
