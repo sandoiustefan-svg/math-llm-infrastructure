@@ -102,7 +102,7 @@ def load_manifest(data_dir: str) -> dict:
         return json.load(f)
 
 
-def save_checkpoint(model, optimizer, step, metrics, samples_consumed, path):
+def save_checkpoint(model, optimizer, step, metrics, samples_consumed, path, exp_id=None):
     os.makedirs(path, exist_ok=True)
     model.save_pretrained(path)
     torch.save({
@@ -110,6 +110,7 @@ def save_checkpoint(model, optimizer, step, metrics, samples_consumed, path):
         "step": step,
         "metrics": metrics,
         "samples_consumed": samples_consumed,
+        "exp_id": exp_id,
     }, os.path.join(path, "training_state.pt"))
     print(f"  Checkpoint saved → {path}")
 
@@ -220,6 +221,7 @@ def train(cfg: TrainConfig) -> None:
     start_step = 0
     skip_samples = 0
     resume_state_path = None
+    exp_id = None
 
     if cfg.resume:
         try:
@@ -239,6 +241,7 @@ def train(cfg: TrainConfig) -> None:
                 start_step = state["step"]
                 metrics = state.get("metrics", metrics)
                 skip_samples = state.get("samples_consumed", 0)
+                exp_id = state.get("exp_id", None)
 
                 if rank == 0:
                     print(f"Will resume from {latest} at step {start_step}, skipping {skip_samples} samples")
@@ -325,12 +328,16 @@ def train(cfg: TrainConfig) -> None:
         if world_size > 1:
             print(f"DDP: {world_size} GPUs, effective batch size = {cfg.batch_size * world_size}")
 
-    exp_id = None
     if rank == 0:
         try:
             registry = ExperimentRegistry()
-            exp_id = registry.start_training(cfg, n_params)
-            print(f"  Experiment registered → {exp_id}")
+            if exp_id is not None:
+                # Resuming — reuse existing experiment entry, just mark it running again
+                registry.update(exp_id, status="running")
+                print(f"  Experiment resumed → {exp_id}")
+            else:
+                exp_id = registry.start_training(cfg, n_params)
+                print(f"  Experiment registered → {exp_id}")
         except Exception as e:
             print(f"  [registry] Warning: could not register experiment: {e}")
 
@@ -448,7 +455,7 @@ def train(cfg: TrainConfig) -> None:
             save_model = model.module if world_size > 1 else model
             ckpt_path = os.path.join(checkpoint_dir, f"step_{step}")
             save_checkpoint(
-                save_model, optimizer, step, metrics, samples_consumed, ckpt_path,
+                save_model, optimizer, step, metrics, samples_consumed, ckpt_path, exp_id=exp_id,
             )
 
             # Keep only the last 2 checkpoints (safety net for hard job kills)
@@ -464,7 +471,7 @@ def train(cfg: TrainConfig) -> None:
         save_model = model.module if world_size > 1 else model
         save_checkpoint(
             save_model, optimizer, cfg.steps, metrics, samples_consumed,
-            os.path.join(checkpoint_dir, "final"),
+            os.path.join(checkpoint_dir, "final"), exp_id=exp_id,
         )
 
         print("Generating training plots...")
