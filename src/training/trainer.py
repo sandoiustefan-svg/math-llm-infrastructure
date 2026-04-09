@@ -111,7 +111,7 @@ def save_checkpoint(model, optimizer, step, metrics, samples_consumed, path, exp
         "metrics": metrics,
         "samples_consumed": samples_consumed,
         "exp_id": exp_id,
-    }, os.path.join(path, "training_state.pt"))
+    }, os.path.join(path, "training_state.pt"), _use_new_zipfile_serialization=False)
     print(f"  Checkpoint saved → {path}")
 
 
