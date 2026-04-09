@@ -15,6 +15,7 @@ mkdir -p logs
 module purge
 module load CUDA/12.6.0
 module load cuDNN/9.5.1.17-CUDA-12.6.0
+module load NCCL/2.26.2-GCCcore-13.3.0-CUDA-12.6.0
 
 export CUDA_HOME="${EBROOTCUDA}"
 export LD_LIBRARY_PATH="${EBROOTCUDA}/lib64:${EBROOTCUDNN}/lib64:${LD_LIBRARY_PATH:-}"
