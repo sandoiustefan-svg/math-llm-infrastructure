@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -105,13 +106,25 @@ def load_manifest(data_dir: str) -> dict:
 def save_checkpoint(model, optimizer, step, metrics, samples_consumed, path, exp_id=None):
     os.makedirs(path, exist_ok=True)
     model.save_pretrained(path)
-    torch.save({
+    state = {
         "optimizer": optimizer.state_dict(),
         "step": step,
         "metrics": metrics,
         "samples_consumed": samples_consumed,
         "exp_id": exp_id,
-    }, os.path.join(path, "training_state.pt"), _use_new_zipfile_serialization=False)
+    }
+    # Serialize to memory first, then flush in 256 MB chunks.
+    # Avoids Lustre large-write EINVAL from PyTorch's C++ _write_file syscall.
+    buf = io.BytesIO()
+    torch.save(state, buf)
+    data = buf.getvalue()
+    del buf
+    state_path = os.path.join(path, "training_state.pt")
+    chunk = 256 * 1024 * 1024
+    with open(state_path, "wb") as f:
+        for i in range(0, len(data), chunk):
+            f.write(data[i : i + chunk])
+    del data
     print(f"  Checkpoint saved → {path}")
 
 
