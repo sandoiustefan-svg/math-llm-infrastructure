@@ -100,16 +100,16 @@ with st.sidebar:
     if is_mc:
         model_path = st.text_input(
             "Model checkpoint path",
-            value="outputs/scratch_1b/checkpoints/final",
+            value="outputs/scratch_1b/checkpoints/best",
         )
         num_passes = st.slider("MC Dropout passes", min_value=5, max_value=50, value=20, step=5)
     else:
         model_paths = st.text_area(
             "Ensemble checkpoint paths (one per line)",
             value="\n".join([
-                "outputs/finetune_seed42/checkpoints/final",
-                "outputs/finetune_seed43/checkpoints/final",
-                "outputs/finetune_seed44/checkpoints/final",
+                "outputs/finetune_seed42/checkpoints/best",
+                "outputs/finetune_seed43/checkpoints/best",
+                "outputs/finetune_seed44/checkpoints/best",
             ]),
             height=120,
         )
