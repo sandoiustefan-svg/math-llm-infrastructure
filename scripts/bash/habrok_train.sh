@@ -40,7 +40,7 @@ export NCCL_IB_DISABLE=1
 
 torchrun --nproc_per_node=4 scripts/python/train.py \
     --data-dir /scratch/s5549329/data/openmathinstruct2 \
-    --tokenizer mistralai/Mistral-7B-v0.1 \
+    --tokenizer meta-llama/Llama-3.2-1B \
     --output-dir /scratch/s5549329/outputs/training_1b \
     --n-layers 16 \
     --hidden-size 2048 \

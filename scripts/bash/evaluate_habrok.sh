@@ -30,7 +30,7 @@ export HF_HOME=/scratch/s5549329/.cache/huggingface
 #   MC Dropout (single model):
 #     sbatch --export=METHOD=mc_dropout,\
 #                     MODEL_PATH=/scratch/.../checkpoints/final,\
-#                     TOKENIZER=mistralai/Mistral-7B-v0.1,\
+#                     TOKENIZER=meta-llama/Llama-3.2-1B,\
 #                     PROBLEMS_FILE=/scratch/.../problems.jsonl,\
 #                     OUTPUT_DIR=/scratch/.../uq_mc_dropout \
 #            scripts/bash/evaluate_habrok.sh
@@ -38,14 +38,14 @@ export HF_HOME=/scratch/s5549329/.cache/huggingface
 #   Deep Ensemble (multiple model paths, space-separated):
 #     sbatch --export=METHOD=ensemble,\
 #                     MODEL_PATHS="/scratch/.../seed42/final /scratch/.../seed43/final /scratch/.../seed44/final",\
-#                     TOKENIZER=mistralai/Mistral-7B-v0.1,\
+#                     TOKENIZER=meta-llama/Llama-3.2-1B,\
 #                     PROBLEMS_FILE=/scratch/.../problems.jsonl,\
 #                     OUTPUT_DIR=/scratch/.../uq_ensemble \
 #            scripts/bash/evaluate_habrok.sh
 # ---------------------------------------------------------------------------
 
 METHOD=${METHOD:-mc_dropout}
-TOKENIZER=${TOKENIZER:-mistralai/Mistral-7B-v0.1}
+TOKENIZER=${TOKENIZER:-meta-llama/Llama-3.2-1B}
 PROBLEMS_FILE=${PROBLEMS_FILE:-/scratch/s5549329/data/problems.jsonl}
 OUTPUT_DIR=${OUTPUT_DIR:-/scratch/s5549329/outputs/uq_eval}
 NUM_PASSES=${NUM_PASSES:-20}

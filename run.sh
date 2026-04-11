@@ -7,7 +7,7 @@ mkdir -p logs
 
 export CUDA_VISIBLE_DEVICES=0,1
 
-TOKENIZER="mistralai/Mistral-7B-v0.1"
+TOKENIZER="meta-llama/Llama-3.2-1B"
 OUT_DIR="data/processed/openmathinstruct2"
 OUTPUT_DIR="outputs/training"
 

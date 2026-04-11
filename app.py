@@ -175,7 +175,7 @@ with st.sidebar:
         # Use the first selected path for chat
         chat_model_path = model_paths.strip().splitlines()[0] if model_paths.strip() else ""
 
-    tokenizer = st.text_input("Tokenizer", value="mistralai/Mistral-7B-v0.1")
+    tokenizer = st.text_input("Tokenizer", value="meta-llama/Llama-3.2-1B")
     max_new_tokens = st.slider("Max new tokens", 64, 1024, 512, step=64)
 
     load_btn = st.button("Load Model", type="primary", use_container_width=True)

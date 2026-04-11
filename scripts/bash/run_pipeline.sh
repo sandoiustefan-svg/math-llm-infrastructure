@@ -10,7 +10,7 @@
 set -euo pipefail
 
 # Defaults (full run — ~500M params)
-TOKENIZER="mistralai/Mistral-7B-v0.1"
+TOKENIZER="meta-llama/Llama-3.2-1B"
 OUT_DIR="data/processed/openmathinstruct2"
 OUTPUT_DIR="outputs/training"
 SPLIT="train"
