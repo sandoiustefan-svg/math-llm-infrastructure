@@ -58,6 +58,8 @@ st.markdown("""
 
 @st.cache_resource(show_spinner="Loading model…")
 def load_mc_dropout(model_path: str, tokenizer: str, num_passes: int, device: str) -> MCDropoutEvaluator:
+    if not Path(model_path).is_absolute():
+        model_path = str((PROJECT_ROOT / model_path).resolve())
     cfg = MCDropoutConfig(
         model_path=model_path,
         tokenizer_name=tokenizer,
@@ -69,7 +71,10 @@ def load_mc_dropout(model_path: str, tokenizer: str, num_passes: int, device: st
 
 @st.cache_resource(show_spinner="Loading ensemble models…")
 def load_ensemble(model_paths_str: str, tokenizer: str, device: str) -> EnsembleEvaluator:
-    paths = [p.strip() for p in model_paths_str.split(",") if p.strip()]
+    paths = [
+        str((PROJECT_ROOT / p.strip()).resolve()) if not Path(p.strip()).is_absolute() else p.strip()
+        for p in model_paths_str.split("\n") if p.strip()
+    ]
     cfg = EnsembleConfig(
         model_paths=paths,
         tokenizer_name=tokenizer,
@@ -97,25 +102,54 @@ with st.sidebar:
 
     is_mc = model_choice.startswith("Scratch")
 
+    def _find_checkpoints() -> list[str]:
+        """Scan outputs/ for available checkpoints (best and final)."""
+        outputs_dir = PROJECT_ROOT / "outputs"
+        checkpoints = []
+        if outputs_dir.exists():
+            for run_dir in sorted(outputs_dir.iterdir()):
+                if not run_dir.is_dir():
+                    continue
+                ckpt_dir = run_dir / "checkpoints"
+                for name in ("best", "final"):
+                    p = ckpt_dir / name
+                    if p.exists():
+                        checkpoints.append(str(p.resolve()))
+        return checkpoints
+
+    available = _find_checkpoints()
+
     if is_mc:
-        model_path = st.text_input(
-            "Model checkpoint path",
-            value="outputs/scratch_1b/checkpoints/best",
-        )
+        if available:
+            model_path = st.selectbox("Model checkpoint", available)
+        else:
+            model_path = st.text_input(
+                "Model checkpoint path (no checkpoints found in outputs/)",
+                value="outputs/scratch_1b/checkpoints/best",
+            )
         num_passes = st.slider("MC Dropout passes", min_value=5, max_value=50, value=20, step=5)
     else:
-        model_paths = st.text_area(
-            "Ensemble checkpoint paths (one per line)",
-            value="\n".join([
-                "outputs/finetune_seed42/checkpoints/best",
-                "outputs/finetune_seed43/checkpoints/best",
-                "outputs/finetune_seed44/checkpoints/best",
-            ]),
-            height=120,
-        )
+        if available:
+            selected = st.multiselect(
+                "Ensemble checkpoints",
+                options=available,
+                default=available[:3],
+                help="Select 3 checkpoints (one per seed) for the ensemble.",
+            )
+            model_paths = "\n".join(selected)
+        else:
+            model_paths = st.text_area(
+                "Ensemble checkpoint paths (one per line, no checkpoints found in outputs/)",
+                value="\n".join([
+                    "outputs/finetune_seed42/checkpoints/best",
+                    "outputs/finetune_seed43/checkpoints/best",
+                    "outputs/finetune_seed44/checkpoints/best",
+                ]),
+                height=120,
+            )
 
     tokenizer = st.text_input("Tokenizer", value="mistralai/Mistral-7B-v0.1")
-    device = st.selectbox("Device", ["cpu", "cuda"], index=0)
+    device = "cuda"
     max_new_tokens = st.slider("Max new tokens", 64, 1024, 512, step=64)
 
     load_btn = st.button("Load Model", type="primary", use_container_width=True)
