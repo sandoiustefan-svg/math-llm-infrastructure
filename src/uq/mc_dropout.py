@@ -51,6 +51,7 @@ class MCDropoutEvaluator:
             do_sample=(self.cfg.temperature > 0),
             temperature=self.cfg.temperature,
             pad_token_id=self.tokenizer.pad_token_id,
+            repetition_penalty=1.3,
         )
         new_tokens = output_ids[0, input_ids.shape[1]:]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True)
