@@ -52,9 +52,22 @@ PRETRAINED=${PRETRAINED:-meta-llama/Llama-3.2-1B}
 STEPS=${STEPS:-5000}
 
 # Self-resubmit only when running open-ended (STEPS >= 50000) so short probe
-# jobs don't keep requeueing indefinitely.
+# jobs don't keep requeueing indefinitely. Check the latest checkpoint step to
+# avoid infinite resubmission after training completes.
 if [[ ${STEPS} -ge 50000 ]]; then
-    sbatch --export=SEED=${SEED},OUTDIR=${OUTDIR},PRETRAINED=${PRETRAINED},STEPS=${STEPS} "$0"
+    CKPT_DIR="/scratch/s5549329/outputs/${OUTDIR}"
+    LATEST_STEP=0
+    if [[ -d "${CKPT_DIR}" ]]; then
+        LATEST=$(ls -d "${CKPT_DIR}"/step_* 2>/dev/null | sort -t_ -k2 -n | tail -1)
+        if [[ -n "${LATEST}" ]]; then
+            LATEST_STEP=$(basename "${LATEST}" | cut -d_ -f2)
+        fi
+    fi
+    if [[ ${LATEST_STEP} -lt ${STEPS} ]]; then
+        sbatch --export=SEED=${SEED},OUTDIR=${OUTDIR},PRETRAINED=${PRETRAINED},STEPS=${STEPS} "$0"
+    else
+        echo "Training complete at step ${LATEST_STEP} — not resubmitting."
+    fi
 fi
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
