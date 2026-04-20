@@ -59,8 +59,8 @@ else
     GRAD_ACCUM=16
 fi
 
-# MC Dropout only on macross (for UQ comparison)
-if [[ "$CLUSTER" == "macross" ]]; then
+# MC Dropout on macross and a100-1 (fse-2a100-1), ensemble members have no dropout
+if [[ "$CLUSTER" == "macross" || "$CLUSTER" == "a100-1" ]]; then
     MC_DROPOUT="--mc-dropout-rate 0.1"
 else
     MC_DROPOUT="--mc-dropout-rate 0.0"

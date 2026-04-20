@@ -7,5 +7,5 @@ paths:
   hf_cache: /home/s5549329/.cache/huggingface
 
 gpus:
-  cuda_devices: "0,1,2,3"   # 4x A100 80GB MIG 7g.80gb
-  n_gpus: 4
+  cuda_devices: "MIG-5eaaabe9-dfae-59c1-bdbc-205f1e514960,MIG-03c7a8b7-dd9c-5bda-82fb-1cf2e9c3a34d"
+  n_gpus: 2
