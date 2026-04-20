@@ -1,0 +1,11 @@
+cluster: a100-1  # fse-2a100-1.ai.rug.nl
+
+paths:
+  base_dir: /home/s5549329/math-llm-infrastructure
+  data_dir: /home/s5549329/math-llm-infrastructure/data/processed/openmathinstruct2
+  output_dir: /home/s5549329/math-llm-infrastructure/outputs/lora_8b
+  hf_cache: /home/s5549329/.cache/huggingface
+
+gpus:
+  cuda_devices: "0,1"   # 2x A100 80GB MIG 7g.80gb
+  n_gpus: 2
