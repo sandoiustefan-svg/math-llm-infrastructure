@@ -24,6 +24,7 @@ except ImportError:
 
 from src.data.packed_dataset import PackedShardDataset
 from src.data.online_dataset import OnlinePackedDataset
+from src.data.doc_mask import build_doc_mask_and_positions
 from src.model.llama_model import LlamaModelConfig, build_llama
 from src.experiments.registry import ExperimentRegistry
 
@@ -407,6 +408,7 @@ def train(cfg: TrainConfig) -> None:
             if rank == 0:
                 model.print_trainable_parameters()
         model.gradient_checkpointing_enable()
+        model.enable_input_require_grads()  # required for PEFT + gradient checkpointing
     else:
         model_cfg = LlamaModelConfig(
             vocab_size=vocab_size,
@@ -418,11 +420,6 @@ def train(cfg: TrainConfig) -> None:
         model = build_llama(model_cfg)
 
     model.to(device)
-
-    if cfg.mc_dropout_rate > 0 and cfg.pretrained_model:
-        _add_mc_dropout_hook(model, cfg.mc_dropout_rate)
-        if rank == 0:
-            print(f"MC Dropout hook added (rate={cfg.mc_dropout_rate}) after final norm")
 
     if cfg.pretrained_model and cfg.trainable_layers > 0:
         # Freeze all parameters, then unfreeze the last N transformer layers + norm + lm_head
@@ -444,6 +441,12 @@ def train(cfg: TrainConfig) -> None:
 
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=cfg.use_lora)
+
+    if cfg.mc_dropout_rate > 0 and cfg.pretrained_model:
+        target = model.module if world_size > 1 else model
+        _add_mc_dropout_hook(target, cfg.mc_dropout_rate)
+        if rank == 0:
+            print(f"MC Dropout hook added (rate={cfg.mc_dropout_rate}) after final norm")
 
     model.train()
 
@@ -506,6 +509,15 @@ def train(cfg: TrainConfig) -> None:
     best_loss = float("inf")
     samples_consumed = skip_samples
     data_iter = iter(loader)
+
+    bos_tokenizer = tokenizer if cfg.online else AutoTokenizer.from_pretrained(cfg.tokenizer)
+    bos_id = bos_tokenizer.convert_tokens_to_ids("<|begin_of_text|>")
+    if bos_id is None or bos_id < 0:
+        # Fallback: LLaMA 3.x hardcoded BOS id
+        bos_id = 128000
+    if rank == 0:
+        print(f"Document-boundary BOS id: {bos_id}")
+
     train_start = time.time()
     step_start = time.time()
 
@@ -529,22 +541,30 @@ def train(cfg: TrainConfig) -> None:
         if loss_mask is not None:
             loss_mask = loss_mask[:, 1:]
 
-        is_accum_step = (step % cfg.grad_accum_steps != 0)
+        is_window_start = (step % cfg.grad_accum_steps == 0)
+        is_step_boundary = ((step + 1) % cfg.grad_accum_steps == 0)
 
-        if not is_accum_step:
+        if is_window_start:
             optimizer.zero_grad(set_to_none=True)
 
         amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
         amp_enabled = use_fp16 or use_bf16
+        attn_mask_4d, pos_ids = build_doc_mask_and_positions(x, bos_id)
+        if amp_enabled:
+            attn_mask_4d = attn_mask_4d.to(amp_dtype)
         with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=amp_enabled):
-            outputs = model(input_ids=x)
+            outputs = model(
+                input_ids=x,
+                attention_mask=attn_mask_4d,
+                position_ids=pos_ids,
+            )
             logits = outputs.logits
             loss = masked_causal_loss(logits, y, loss_mask)
             loss = loss / cfg.grad_accum_steps
 
         scaler.scale(loss).backward()
 
-        if not is_accum_step:
+        if is_step_boundary:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
             scaler.step(optimizer)

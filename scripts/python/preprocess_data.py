@@ -57,7 +57,7 @@ def main():
         out_dir=args.out_dir,
         shard_num_seqs=args.shard_num_seqs,
         save_loss_mask=(not args.no_loss_mask),
-        add_eos=True,
+        add_eos=False,  # instruct format already adds <|eot_id|> in completion_text
     )
 
     # Generator of formatted examples

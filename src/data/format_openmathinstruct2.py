@@ -36,7 +36,9 @@ def format_openmathinstruct2_exmaple(ex: Dict[str, Any], cfg: FormatConfig) -> D
         # LLaMA 3.1 Instruct native chat template
         # <|begin_of_text|> acts as a per-example separator in packed sequences
         prompt_text = (
-            "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
+            "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
+            "You are a helpful math assistant. Solve the following problem step by step.<|eot_id|>"
+            "<|start_header_id|>user<|end_header_id|>\n\n"
             f"{problem}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
         )
         if cfg.include_final_answer and ans:
