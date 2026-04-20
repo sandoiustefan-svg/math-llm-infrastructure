@@ -442,7 +442,7 @@ def train(cfg: TrainConfig) -> None:
                   f"({trainable:,} / {total:,} params, {100*trainable/total:.1f}%)")
 
     if world_size > 1:
-        model = DDP(model, device_ids=[local_rank])
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=cfg.use_lora)
 
     model.train()
 

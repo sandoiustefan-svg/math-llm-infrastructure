@@ -114,7 +114,7 @@ def tokenzie_pack_and_save(
     if tok.eos_token_id is None:
         raise ValueError("Tokenizer has no eos_token_id. Provide a LLaMA-compatible tokenizer.")
 
-    vocab_size = tok.vocab_size if tok.vocab_size is not None else len(tok)
+    vocab_size = len(tok)  # len(tok) includes special tokens; tok.vocab_size may not
     seq_len = pack_cfg.seq_len
     dtype = np.int32 if pack_cfg.dtype == "int32" else np.int64
 

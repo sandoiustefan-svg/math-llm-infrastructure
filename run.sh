@@ -74,7 +74,7 @@ torchrun --nproc_per_node="$N_GPUS" scripts/python/train.py \
     --grad-accum-steps 8 \
     --lr 2e-4 \
     --steps 1200000 \
-    --warmup-steps 1000 \
+    --warmup-steps 5000 \
     --num-workers 4 \
     --save-every 10000 \
     --log-every 100 \

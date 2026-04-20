@@ -94,7 +94,7 @@ class OnlinePackedDataset(IterableDataset):
             limit=self.limit,
             skip=self.skip,
         )
-        fmt_cfg = FormatConfig(include_final_answer=True)
+        fmt_cfg = FormatConfig(include_final_answer=True, instruct_format=True)
 
         for ex in iter_openmathinstruct2(read_cfg):
             formatted = format_openmathinstruct2_exmaple(ex, fmt_cfg)

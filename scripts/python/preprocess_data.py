@@ -49,7 +49,7 @@ def main():
         skip=args.skip,
     )
 
-    fmt_cfg = FormatConfig(include_final_answer=True)
+    fmt_cfg = FormatConfig(include_final_answer=True, instruct_format=True)
 
     pack_cfg = PackConfig(
         tokenizer_name_or_path=args.tokenizer,
