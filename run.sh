@@ -55,8 +55,8 @@ if [[ "$CLUSTER" == a100* ]]; then
     BATCH_SIZE=16
     GRAD_ACCUM=2
 else
-    BATCH_SIZE=2
-    GRAD_ACCUM=8
+    BATCH_SIZE=1
+    GRAD_ACCUM=16
 fi
 
 # MC Dropout only on macross (for UQ comparison)

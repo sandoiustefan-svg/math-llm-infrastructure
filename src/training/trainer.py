@@ -406,6 +406,7 @@ def train(cfg: TrainConfig) -> None:
             model = _apply_lora(model, cfg)
             if rank == 0:
                 model.print_trainable_parameters()
+        model.gradient_checkpointing_enable()
     else:
         model_cfg = LlamaModelConfig(
             vocab_size=vocab_size,
