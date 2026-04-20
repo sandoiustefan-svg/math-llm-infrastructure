@@ -1,0 +1,11 @@
+cluster: macross
+
+paths:
+  base_dir: /home/bsandoiu/math-llm-infrastructure
+  data_dir: /home/bsandoiu/math-llm-infrastructure/data/processed/openmathinstruct2
+  output_dir: /home/bsandoiu/math-llm-infrastructure/outputs/lora_8b
+  hf_cache: /home/bsandoiu/.cache/huggingface
+
+gpus:
+  cuda_devices: "1,2"   # skip GPU 0 (RTX 5060 Ti, 16GB — too small for 8B)
+  n_gpus: 2

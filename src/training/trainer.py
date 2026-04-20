@@ -9,11 +9,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+try:
+    from peft import LoraConfig, get_peft_model, PeftModel, TaskType
+    _PEFT_AVAILABLE = True
+except ImportError:
+    _PEFT_AVAILABLE = False
 
 from src.data.packed_dataset import PackedShardDataset
 from src.data.online_dataset import OnlinePackedDataset
@@ -49,6 +56,16 @@ class TrainConfig:
 
     # Fine-tuning
     pretrained_model: str = ""  # HF model ID or local path; empty = train from scratch
+    trainable_layers: int = 0   # 0 = all layers; N > 0 = freeze all except last N transformer layers + norm + lm_head
+
+    # LoRA
+    use_lora: bool = False
+    lora_rank: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.1
+
+    # MC Dropout (UQ at inference)
+    mc_dropout_rate: float = 0.1  # dropout applied after final norm, before lm_head
 
     # Reproducibility
     seed: int = 42
@@ -57,6 +74,36 @@ class TrainConfig:
     save_every: int = 500
     log_every: int = 50
     resume: bool = False
+
+
+def _apply_lora(model, cfg: TrainConfig):
+    if not _PEFT_AVAILABLE:
+        raise ImportError("peft not installed — run: pip install peft")
+    lora_cfg = LoraConfig(
+        r=cfg.lora_rank,
+        lora_alpha=cfg.lora_alpha,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        lora_dropout=cfg.lora_dropout,
+        bias="none",
+        task_type=TaskType.CAUSAL_LM,
+    )
+    return get_peft_model(model, lora_cfg)
+
+
+def _add_mc_dropout_hook(model, rate: float) -> None:
+    """Add dropout after the final RMSNorm (before lm_head) for MC Dropout UQ.
+
+    Works with bare LlamaForCausalLM and PEFT-wrapped models.
+    Call model.train() at inference time to enable stochastic sampling.
+    """
+    dropout = nn.Dropout(p=rate)
+    # Navigate: (PeftModel ->) LlamaForCausalLM -> LlamaModel -> norm
+    m = model
+    if hasattr(m, 'base_model'):       # PEFT LoraModel
+        m = m.base_model.model
+    inner = m.model                    # LlamaModel
+    dropout.to(next(inner.parameters()).device)
+    inner.norm.register_forward_hook(lambda _m, _i, o: dropout(o))
 
 
 def _lr_lambda(step: int, warmup_steps: int, total_steps: int) -> float:
@@ -103,15 +150,17 @@ def load_manifest(data_dir: str) -> dict:
         return json.load(f)
 
 
-def save_checkpoint(model, optimizer, step, metrics, samples_consumed, path, exp_id=None):
+def save_checkpoint(model, optimizer, step, metrics, samples_consumed, path, exp_id=None, use_lora=False, base_model_id=""):
     os.makedirs(path, exist_ok=True)
-    model.save_pretrained(path)
+    model.save_pretrained(path)  # saves adapters only if PEFT, full model otherwise
     state = {
         "optimizer": optimizer.state_dict(),
         "step": step,
         "metrics": metrics,
         "samples_consumed": samples_consumed,
         "exp_id": exp_id,
+        "use_lora": use_lora,
+        "base_model_id": base_model_id,
     }
     # Serialize to memory first, then flush in 256 MB chunks.
     # Avoids Lustre large-write EINVAL from PyTorch's C++ _write_file syscall.
@@ -346,14 +395,17 @@ def train(cfg: TrainConfig) -> None:
     if cfg.pretrained_model:
         model = AutoModelForCausalLM.from_pretrained(
             cfg.pretrained_model,
-            dtype=torch.bfloat16,
+            torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
         )
-        # Use the pretrained model's own dimensions
         seq_len = model.config.max_position_embeddings
         vocab_size = model.config.vocab_size
         if rank == 0:
             print(f"Loaded pretrained model: {cfg.pretrained_model}")
+        if cfg.use_lora:
+            model = _apply_lora(model, cfg)
+            if rank == 0:
+                model.print_trainable_parameters()
     else:
         model_cfg = LlamaModelConfig(
             vocab_size=vocab_size,
@@ -366,14 +418,39 @@ def train(cfg: TrainConfig) -> None:
 
     model.to(device)
 
+    if cfg.mc_dropout_rate > 0 and cfg.pretrained_model:
+        _add_mc_dropout_hook(model, cfg.mc_dropout_rate)
+        if rank == 0:
+            print(f"MC Dropout hook added (rate={cfg.mc_dropout_rate}) after final norm")
+
+    if cfg.pretrained_model and cfg.trainable_layers > 0:
+        # Freeze all parameters, then unfreeze the last N transformer layers + norm + lm_head
+        for p in model.parameters():
+            p.requires_grad_(False)
+        inner = model.model  # LlamaModel inside LlamaForCausalLM
+        for layer in inner.layers[-cfg.trainable_layers:]:
+            for p in layer.parameters():
+                p.requires_grad_(True)
+        for p in inner.norm.parameters():
+            p.requires_grad_(True)
+        for p in model.lm_head.parameters():
+            p.requires_grad_(True)
+        if rank == 0:
+            trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            total = sum(p.numel() for p in model.parameters())
+            print(f"Partial fine-tune: last {cfg.trainable_layers} layers trainable "
+                  f"({trainable:,} / {total:,} params, {100*trainable/total:.1f}%)")
+
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank])
 
     model.train()
 
-    n_params = sum(p.numel() for p in model.parameters())
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     if rank == 0:
-        print(f"Model parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"Model parameters: {total_params:,} ({total_params / 1e6:.1f}M), "
+              f"trainable: {n_params:,} ({n_params / 1e6:.1f}M)")
         if world_size > 1:
             print(f"DDP: {world_size} GPUs, effective batch size = {cfg.batch_size * world_size}")
 
@@ -390,7 +467,8 @@ def train(cfg: TrainConfig) -> None:
         except Exception as e:
             print(f"  [registry] Warning: could not register experiment: {e}")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable_params, lr=cfg.lr)
     # GradScaler only for fp16 (bf16 has wide dynamic range and doesn't need it)
     use_fp16 = cfg.fp16 and not cfg.bf16 and "cuda" in str(device)
     use_bf16 = cfg.bf16 and "cuda" in str(device)
@@ -403,21 +481,24 @@ def train(cfg: TrainConfig) -> None:
 
     if resume_state_path is not None:
         raw_model = model.module if world_size > 1 else model
-        loaded = AutoModelForCausalLM.from_pretrained(
-            resume_state_path,
-            dtype=torch.bfloat16,
-            low_cpu_mem_usage=True,
-        )
-        raw_model.load_state_dict(loaded.state_dict())
-        del loaded
-
-        state = torch.load(
+        resume_state = torch.load(
             os.path.join(resume_state_path, "training_state.pt"),
             map_location=device,
         )
-        optimizer.load_state_dict(state["optimizer"])
-        del state
-
+        if resume_state.get("use_lora") and _PEFT_AVAILABLE:
+            base_id = resume_state.get("base_model_id") or cfg.pretrained_model
+            base = AutoModelForCausalLM.from_pretrained(base_id, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True)
+            loaded = PeftModel.from_pretrained(base, resume_state_path)
+            raw_model.load_state_dict(loaded.state_dict())
+            del base, loaded
+        else:
+            loaded = AutoModelForCausalLM.from_pretrained(
+                resume_state_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True,
+            )
+            raw_model.load_state_dict(loaded.state_dict())
+            del loaded
+        optimizer.load_state_dict(resume_state["optimizer"])
+        del resume_state
         if rank == 0:
             print(f"Resumed model and optimizer from step {start_step}")
 
@@ -464,7 +545,7 @@ def train(cfg: TrainConfig) -> None:
 
         if not is_accum_step:
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
@@ -505,10 +586,11 @@ def train(cfg: TrainConfig) -> None:
             save_model = model.module if world_size > 1 else model
             ckpt_path = os.path.join(checkpoint_dir, f"step_{step}")
             save_checkpoint(
-                save_model, optimizer, step, metrics, samples_consumed, ckpt_path, exp_id=exp_id,
+                save_model, optimizer, step, metrics, samples_consumed, ckpt_path,
+                exp_id=exp_id, use_lora=cfg.use_lora, base_model_id=cfg.pretrained_model,
             )
-            plot_metrics(metrics, cfg.output_dir)  # overrides training_metrics.png each checkpoint
-            plot_loss_curve(metrics, f"/home2/s5549329/math-llm-infrastructure/outputs/loss_curve_{os.path.basename(cfg.output_dir)}.png")
+            plot_metrics(metrics, cfg.output_dir)
+            plot_loss_curve(metrics, os.path.join(cfg.output_dir, "loss_curve.png"))
 
             # Save best checkpoint based on average loss over the last save_every steps
             window = min(cfg.save_every, len(metrics["loss"]))
@@ -532,12 +614,13 @@ def train(cfg: TrainConfig) -> None:
         save_model = model.module if world_size > 1 else model
         save_checkpoint(
             save_model, optimizer, cfg.steps, metrics, samples_consumed,
-            os.path.join(checkpoint_dir, "final"), exp_id=exp_id,
+            os.path.join(checkpoint_dir, "final"),
+            exp_id=exp_id, use_lora=cfg.use_lora, base_model_id=cfg.pretrained_model,
         )
 
         print("Generating training plots...")
         plot_metrics(metrics, cfg.output_dir)
-        plot_loss_curve(metrics, "/home2/s5549329/math-llm-infrastructure/outputs/loss_curve.png")
+        plot_loss_curve(metrics, os.path.join(cfg.output_dir, "loss_curve.png"))
 
         print("")
         print("Training complete.")

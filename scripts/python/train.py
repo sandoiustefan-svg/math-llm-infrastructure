@@ -21,6 +21,12 @@ def main():
 
     # Model (ignored when --pretrained-model is set)
     ap.add_argument("--pretrained-model", default="", help="HF model ID or local path for fine-tuning (skips scratch init)")
+    ap.add_argument("--trainable-layers", type=int, default=0, help="Freeze all except last N transformer layers + norm + lm_head (0 = train all)")
+    ap.add_argument("--use-lora", action="store_true", help="Apply LoRA adapters (requires --pretrained-model)")
+    ap.add_argument("--lora-rank", type=int, default=16, help="LoRA rank r")
+    ap.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha scaling factor")
+    ap.add_argument("--lora-dropout", type=float, default=0.1, help="Dropout inside LoRA adapters")
+    ap.add_argument("--mc-dropout-rate", type=float, default=0.1, help="MC Dropout rate after final norm (0 = disabled)")
     ap.add_argument("--n-layers", type=int, default=24)
     ap.add_argument("--hidden-size", type=int, default=2048)
     ap.add_argument("--n-heads", type=int, default=16)
@@ -47,6 +53,12 @@ def main():
     cfg = TrainConfig(
         tokenizer=args.tokenizer,
         pretrained_model=args.pretrained_model,
+        trainable_layers=args.trainable_layers,
+        use_lora=args.use_lora,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        mc_dropout_rate=args.mc_dropout_rate,
         output_dir=args.output_dir,
         data_dir=args.data_dir,
         online=args.online,
