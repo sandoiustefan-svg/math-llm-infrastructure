@@ -4,7 +4,7 @@ paths:
   base_dir: /home/s5549329/math-llm-infrastructure
   data_dir: /home/s5549329/math-llm-infrastructure/data/processed/openmathinstruct2
   output_dir: /home/s5549329/math-llm-infrastructure/outputs/lora_8b
-  hf_cache: /home/s5549329/.cache/huggingface
+  hf_cache: /scratch/s5549329/.cache/huggingface
 
 gpus:
   cuda_devices: "MIG-5eaaabe9-dfae-59c1-bdbc-205f1e514960,MIG-03c7a8b7-dd9c-5bda-82fb-1cf2e9c3a34d"
