@@ -478,9 +478,18 @@ def train(cfg: TrainConfig) -> None:
     use_bf16 = cfg.bf16 and "cuda" in str(device)
     scaler = torch.amp.GradScaler("cuda", enabled=use_fp16)
 
+    # Scheduler counter advances only at optimizer boundaries (every grad_accum_steps).
+    # Convert cfg.steps (micro-batch iterations) and start_step to optimizer-step units
+    # so warmup/cosine decay line up with actual optimizer updates.
+    total_opt_steps = max(1, cfg.steps // cfg.grad_accum_steps)
+    warmup_opt_steps = max(1, cfg.warmup_steps)
+    start_opt_step = start_step // cfg.grad_accum_steps
+
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
-        lr_lambda=lambda step: _lr_lambda(step + start_step, cfg.warmup_steps, cfg.steps),
+        lr_lambda=lambda step: _lr_lambda(
+            step + start_opt_step, warmup_opt_steps, total_opt_steps
+        ),
     )
 
     if resume_state_path is not None:
