@@ -97,7 +97,7 @@ torchrun --nproc_per_node="$N_GPUS" scripts/python/train.py \
     --batch-size "$BATCH_SIZE" \
     --grad-accum-steps "$GRAD_ACCUM" \
     --lr 2e-4 \
-    --steps 1200000 \
+    --steps 50000 \
     --warmup-steps 5000 \
     --num-workers 4 \
     --save-every 10000 \

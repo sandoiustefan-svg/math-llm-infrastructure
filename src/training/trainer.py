@@ -602,6 +602,7 @@ def train(cfg: TrainConfig) -> None:
                 f"Elapsed {elapsed_str} | "
                 f"ETA {eta_str}"
             )
+            plot_loss_curve(metrics, os.path.join(cfg.output_dir, "loss_curve.png"))
 
         if rank == 0 and cfg.save_every > 0 and step > 0 and step % cfg.save_every == 0:
             save_model = model.module if world_size > 1 else model
