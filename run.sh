@@ -52,8 +52,8 @@ TOKENIZER="$BASE_MODEL"
 # A100s have 80GB — use larger batches for faster training
 # macross 3090s have 24GB — keep small batches
 if [[ "$CLUSTER" == a100* ]]; then
-    BATCH_SIZE=16
-    GRAD_ACCUM=2
+    BATCH_SIZE=8
+    GRAD_ACCUM=4
 else
     BATCH_SIZE=1
     GRAD_ACCUM=16
