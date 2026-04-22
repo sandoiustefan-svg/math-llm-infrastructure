@@ -118,6 +118,11 @@ def tokenzie_pack_and_save(
     seq_len = pack_cfg.seq_len
     dtype = np.int32 if pack_cfg.dtype == "int32" else np.int64
 
+    # Padding token used to fill the tail of a sequence when an example doesn't
+    # fit in the remaining space. Loss mask is 0 so padding never contributes to
+    # training loss. Any token id works; use pad_token_id when available.
+    pad_id = tok.pad_token_id if tok.pad_token_id is not None else 0
+
     token_buf: List[int] = []
     loss_buf: List[int] = []
 
@@ -131,9 +136,39 @@ def tokenzie_pack_and_save(
     total_prompt_tokens = 0
     total_completion_tokens = 0
     skipped_examples = 0
+    truncated_examples = 0
+    total_padded_tokens = 0
 
     t_start = time.time()
     t_last_log = t_start
+
+    def _flush_sequence():
+        """Pad the current buffer to seq_len and emit one sequence."""
+        nonlocal total_seqs, total_padded_tokens
+        pad_len = seq_len - len(token_buf)
+        if pad_len > 0:
+            token_buf.extend([pad_id] * pad_len)
+            loss_buf.extend([0] * pad_len)
+            total_padded_tokens += pad_len
+        seq_ids = np.array(token_buf[:seq_len], dtype=dtype)
+        seq_mask = np.array(loss_buf[:seq_len], dtype=dtype) if pack_cfg.save_loss_mask else None
+        del token_buf[:seq_len]
+        del loss_buf[:seq_len]
+        shard_input_ids.append(seq_ids)
+        if seq_mask is not None:
+            shard_loss_mask.append(seq_mask)
+        total_seqs += 1
+
+    def _maybe_save_shard():
+        nonlocal shard_idx, saved_shards
+        if len(shard_input_ids) >= pack_cfg.shard_num_seqs:
+            input_ids_arr = np.stack(shard_input_ids, axis=0)
+            loss_mask_arr = np.stack(shard_loss_mask, axis=0) if pack_cfg.save_loss_mask else None
+            _save_shard(out_dir, shard_idx, input_ids_arr, loss_mask_arr, logger)
+            shard_idx += 1
+            saved_shards += 1
+            shard_input_ids.clear()
+            shard_loss_mask.clear()
 
     for ex in examples:
         prompt_text = ex["prompt_text"]
@@ -150,43 +185,32 @@ def tokenzie_pack_and_save(
         if pack_cfg.add_eos:
             completion_ids = completion_ids + [tok.eos_token_id]
 
+        example_ids = prompt_ids + completion_ids
+        example_mask = [0] * len(prompt_ids) + [1] * len(completion_ids)
+
+        # Truncate examples that are longer than seq_len (rare for math problems).
+        if len(example_ids) > seq_len:
+            example_ids = example_ids[:seq_len]
+            example_mask = example_mask[:seq_len]
+            truncated_examples += 1
+
         total_prompt_tokens += len(prompt_ids)
         total_completion_tokens += len(completion_ids)
-
-        token_buf.extend(prompt_ids)
-        loss_buf.extend([0] * len(prompt_ids))
-        token_buf.extend(completion_ids)
-        loss_buf.extend([1] * len(completion_ids))
-
         total_examples += 1
 
-        # Pack into fixed-length sequences
-        while len(token_buf) >= seq_len:
-            seq_ids = np.array(token_buf[:seq_len], dtype=dtype)
-            token_buf = token_buf[seq_len:]
+        # If this example doesn't fit in the remaining buffer space, flush first.
+        # This guarantees no example ever spans two packed sequences.
+        if token_buf and len(token_buf) + len(example_ids) > seq_len:
+            _flush_sequence()
+            _maybe_save_shard()
 
-            if pack_cfg.save_loss_mask:
-                seq_mask = np.array(loss_buf[:seq_len], dtype=dtype)
-                loss_buf = loss_buf[seq_len:]
-            else:
-                seq_mask = None
-                loss_buf = loss_buf[seq_len:]
+        token_buf.extend(example_ids)
+        loss_buf.extend(example_mask)
 
-            shard_input_ids.append(seq_ids)
-            if pack_cfg.save_loss_mask and seq_mask is not None:
-                shard_loss_mask.append(seq_mask)
-
-            total_seqs += 1
-
-            # Save shard if enough sequences accumulated
-            if len(shard_input_ids) >= pack_cfg.shard_num_seqs:
-                input_ids_arr = np.stack(shard_input_ids, axis=0)
-                loss_mask_arr = np.stack(shard_loss_mask, axis=0) if pack_cfg.save_loss_mask else None
-                _save_shard(out_dir, shard_idx, input_ids_arr, loss_mask_arr, logger)
-                shard_idx += 1
-                saved_shards += 1
-                shard_input_ids.clear()
-                shard_loss_mask.clear()
+        # A single example may exactly fill seq_len — emit it immediately.
+        if len(token_buf) == seq_len:
+            _flush_sequence()
+            _maybe_save_shard()
 
         # Log every 10k examples or every 30 seconds
         now = time.time()
@@ -200,25 +224,28 @@ def tokenzie_pack_and_save(
             )
             logger.info(
                 "Progress | examples=%d | packed_seqs=%d | shards=%d | "
-                "buffer_tokens=%d | skipped=%d | "
+                "buffer_tokens=%d | skipped=%d | truncated=%d | "
                 "prompt_tokens=%d | completion_tokens=%d (%.1f%%) | "
-                "speed=%.0f ex/s | elapsed=%.1fs",
+                "padded_tokens=%d | speed=%.0f ex/s | elapsed=%.1fs",
                 total_examples, total_seqs, saved_shards,
-                len(token_buf), skipped_examples,
+                len(token_buf), skipped_examples, truncated_examples,
                 total_prompt_tokens, total_completion_tokens, completion_ratio,
-                examples_per_sec, elapsed,
+                total_padded_tokens, examples_per_sec, elapsed,
             )
             t_last_log = now
 
-    # Save remainder shard (partial shard, but each sequence is full length)
+    # Flush any remaining partial sequence
+    if token_buf:
+        _flush_sequence()
+        _maybe_save_shard()
+
+    # Save final partial shard if anything remains
     if shard_input_ids:
         input_ids_arr = np.stack(shard_input_ids, axis=0)
         loss_mask_arr = np.stack(shard_loss_mask, axis=0) if pack_cfg.save_loss_mask else None
         _save_shard(out_dir, shard_idx, input_ids_arr, loss_mask_arr, logger)
         saved_shards += 1
 
-    discarded_tokens = len(token_buf)
-    total_tokens = total_prompt_tokens + total_completion_tokens
     elapsed_total = time.time() - t_start
 
     # Save manifest first
@@ -234,10 +261,12 @@ def tokenzie_pack_and_save(
         "dtype": pack_cfg.dtype,
         "add_eos": bool(pack_cfg.add_eos),
         "save_loss_mask": bool(pack_cfg.save_loss_mask),
+        "boundary_aware_packing": True,
         "num_shards": int(saved_shards),
         "packed_seqs": int(total_seqs),
         "packed_tokens": int(total_seqs) * int(pack_cfg.seq_len),
-        "discarded_tokens": int(discarded_tokens),
+        "padded_tokens": int(total_padded_tokens),
+        "truncated_examples": int(truncated_examples),
         "total_prompt_tokens": int(total_prompt_tokens),
         "total_completion_tokens": int(total_completion_tokens),
     }
@@ -247,10 +276,12 @@ def tokenzie_pack_and_save(
         json.dump(manifest, f, indent=2)
 
     # Then log complete summary
+    total_tokens = total_prompt_tokens + total_completion_tokens
     logger.info("=" * 60)
     logger.info("PREPROCESSING COMPLETE")
     logger.info("  examples processed  : %d", total_examples)
     logger.info("  examples skipped    : %d", skipped_examples)
+    logger.info("  examples truncated  : %d", truncated_examples)
     logger.info("  total tokens        : %d", total_tokens)
     logger.info(
         "    prompt tokens     : %d (%.1f%%)",
@@ -265,10 +296,11 @@ def tokenzie_pack_and_save(
     logger.info("  packed sequences    : %d", total_seqs)
     logger.info("  packed tokens       : %d", total_seqs * seq_len)
     logger.info(
-        "  discarded tokens    : %d (%.2f%%)",
-        discarded_tokens,
-        discarded_tokens / total_tokens * 100 if total_tokens else 0,
+        "  padded tokens       : %d (%.2f%% overhead)",
+        total_padded_tokens,
+        total_padded_tokens / (total_seqs * seq_len) * 100 if total_seqs else 0,
     )
+    logger.info("  truncated examples  : %d", truncated_examples)
     logger.info("  shards saved        : %d", saved_shards)
     logger.info("  manifest            : %s", str(manifest_path))
     logger.info("  out_dir             : %s", out_dir)
