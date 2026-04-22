@@ -45,6 +45,7 @@ class PackedShardDataset(IterableDataset):
         rank: int = 0,
         world_size: int = 1,
         skip_samples: int = 0,
+        shard_indices: Optional[list[int]] = None,
     ):
         """
         Args:
@@ -68,6 +69,11 @@ class PackedShardDataset(IterableDataset):
                 Number of samples to skip before yielding. Used for
                 resuming training from a checkpoint without re-processing
                 already-seen data.
+
+            shard_indices (Optional[list[int]]):
+                If provided, restrict the dataset to this subset of shard
+                indices (into the sorted shard list). Used to split shards
+                into train/val partitions. None = use all shards.
         """
         super().__init__()
 
@@ -103,6 +109,11 @@ class PackedShardDataset(IterableDataset):
                 )
         else:
             self.mask_shards = None
+
+        if shard_indices is not None:
+            self.input_shards = [self.input_shards[i] for i in shard_indices]
+            if self.mask_shards is not None:
+                self.mask_shards = [self.mask_shards[i] for i in shard_indices]
 
     def set_epoch(self, epoch: int) -> None:
         """

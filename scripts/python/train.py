@@ -45,6 +45,11 @@ def main():
     ap.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
     ap.add_argument("--seed", type=int, default=42, help="Random seed (use different seeds for ensemble members)")
 
+    # Validation
+    ap.add_argument("--val-shard-count", type=int, default=0, help="Hold out last K shards as val (0 = no val)")
+    ap.add_argument("--val-every", type=int, default=1000, help="Run val every N micro-batch steps")
+    ap.add_argument("--val-batches", type=int, default=50, help="Number of val batches per pass")
+
     args = ap.parse_args()
 
     if not args.online and not args.data_dir:
@@ -79,6 +84,9 @@ def main():
         log_every=args.log_every,
         resume=args.resume,
         seed=args.seed,
+        val_shard_count=args.val_shard_count,
+        val_every=args.val_every,
+        val_batches=args.val_batches,
     )
 
     train(cfg)

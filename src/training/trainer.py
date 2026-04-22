@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -76,6 +77,11 @@ class TrainConfig:
     log_every: int = 50
     resume: bool = False
 
+    # Validation
+    val_shard_count: int = 0      # 0 = no val
+    val_every: int = 1000          # micro-batch steps between val passes
+    val_batches: int = 50          # how many val batches per pass
+
 
 def _apply_lora(model, cfg: TrainConfig):
     if not _PEFT_AVAILABLE:
@@ -104,7 +110,9 @@ def _add_mc_dropout_hook(model, rate: float) -> None:
         m = m.base_model.model
     inner = m.model                    # LlamaModel
     dropout.to(next(inner.parameters()).device)
-    inner.norm.register_forward_hook(lambda _m, _i, o: dropout(o))
+    # Register as submodule so model.eval()/train() propagates to it.
+    inner.norm.add_module("_mc_dropout", dropout)
+    inner.norm.register_forward_hook(lambda _m, _i, o: inner.norm._mc_dropout(o))
 
 
 def _lr_lambda(step: int, warmup_steps: int, total_steps: int) -> float:
@@ -123,6 +131,59 @@ def _format_time(seconds: float) -> str:
     if h > 0:
         return f"{h}h {m:02d}m {s:02d}s"
     return f"{m}m {s:02d}s"
+
+
+@torch.no_grad()
+def _run_validation(
+    model,
+    val_loader,
+    device,
+    use_bf16: bool,
+    bos_id: int,
+    max_batches: int,
+    world_size: int,
+) -> float:
+    """Run a fixed number of val batches under eval mode and return mean loss.
+
+    All ranks must call this together — DDP forward triggers collective ops.
+    """
+    was_training = model.training
+    model.eval()
+
+    total_loss = torch.zeros(1, device=device)
+    total_count = torch.zeros(1, device=device)
+
+    amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    amp_enabled = use_bf16
+
+    for i, batch in enumerate(val_loader):
+        if i >= max_batches:
+            break
+        input_ids = batch["input_ids"].to(device, non_blocking=True)
+        loss_mask = batch["loss_mask"].to(device, non_blocking=True) if "loss_mask" in batch else None
+
+        x = input_ids[:, :-1]
+        y = input_ids[:, 1:]
+        if loss_mask is not None:
+            loss_mask = loss_mask[:, 1:]
+
+        attn_mask_4d, pos_ids = build_doc_mask_and_positions(x, bos_id)
+        if amp_enabled:
+            attn_mask_4d = attn_mask_4d.to(amp_dtype)
+        with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=amp_enabled):
+            outputs = model(input_ids=x, attention_mask=attn_mask_4d, position_ids=pos_ids)
+            loss = masked_causal_loss(outputs.logits, y, loss_mask)
+        total_loss += loss.detach()
+        total_count += 1
+
+    if world_size > 1:
+        dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_count, op=dist.ReduceOp.SUM)
+
+    if was_training:
+        model.train()
+
+    return (total_loss / total_count.clamp_min(1.0)).item()
 
 
 def masked_causal_loss(
@@ -190,13 +251,16 @@ def plot_loss_curve(metrics: dict, path: str) -> None:
         window = max(1, len(loss) // 50)
 
         fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(steps, loss, linewidth=0.8, alpha=0.4, label="raw")
+        ax.plot(steps, loss, linewidth=0.8, alpha=0.4, label="train (raw)")
         if len(loss) > window:
             smoothed = [
                 sum(loss[max(0, i - window):i + 1]) / len(loss[max(0, i - window):i + 1])
                 for i in range(len(loss))
             ]
-            ax.plot(steps, smoothed, linewidth=2, color="red", label="smoothed")
+            ax.plot(steps, smoothed, linewidth=2, color="red", label="train (smoothed)")
+        if metrics.get("val_steps"):
+            ax.plot(metrics["val_steps"], metrics["val_loss"],
+                    linewidth=2, color="orange", marker="o", markersize=4, label="val")
         ax.set_xlabel("Step")
         ax.set_ylabel("Loss")
         ax.set_title(f"Training Loss (step {steps[-1] if steps else 0})")
@@ -228,14 +292,17 @@ def plot_metrics(metrics: dict, output_dir: str):
         window = max(1, len(metrics["loss"]) // 50)
 
         ax = axes[0, 0]
-        ax.plot(metrics["steps"], metrics["loss"], linewidth=0.8, alpha=0.4, label="raw")
+        ax.plot(metrics["steps"], metrics["loss"], linewidth=0.8, alpha=0.4, label="train (raw)")
         if len(metrics["loss"]) > window:
             smoothed = [
                 sum(metrics["loss"][max(0, i - window):i + 1])
                 / len(metrics["loss"][max(0, i - window):i + 1])
                 for i in range(len(metrics["loss"]))
             ]
-            ax.plot(metrics["steps"], smoothed, linewidth=2, color="red", label="smoothed")
+            ax.plot(metrics["steps"], smoothed, linewidth=2, color="red", label="train (smoothed)")
+        if metrics.get("val_steps"):
+            ax.plot(metrics["val_steps"], metrics["val_loss"],
+                    linewidth=2, color="orange", marker="o", markersize=4, label="val")
         ax.set_xlabel("Step")
         ax.set_ylabel("Loss")
         ax.set_title("Training Loss")
@@ -246,6 +313,10 @@ def plot_metrics(metrics: dict, output_dir: str):
         ax.plot(metrics["steps"], metrics["loss"], linewidth=0.8, alpha=0.4)
         if len(metrics["loss"]) > window:
             ax.plot(metrics["steps"], smoothed, linewidth=2, color="red")
+        if metrics.get("val_steps"):
+            ax.plot(metrics["val_steps"], metrics["val_loss"],
+                    linewidth=2, color="orange", marker="o", markersize=4, label="val")
+            ax.legend()
         ax.set_yscale("log")
         ax.set_xlabel("Step")
         ax.set_ylabel("Loss (log)")
@@ -312,6 +383,8 @@ def train(cfg: TrainConfig) -> None:
         "loss": [],
         "lr": [],
         "tokens_per_sec": [],
+        "val_steps": [],
+        "val_loss": [],
     }
 
     start_step = 0
@@ -336,6 +409,8 @@ def train(cfg: TrainConfig) -> None:
                 state = torch.load(state_path, map_location="cpu")
                 start_step = state["step"]
                 metrics = state.get("metrics", metrics)
+                metrics.setdefault("val_steps", [])
+                metrics.setdefault("val_loss", [])
                 skip_samples = state.get("samples_consumed", 0)
                 exp_id = state.get("exp_id", None)
 
@@ -345,6 +420,7 @@ def train(cfg: TrainConfig) -> None:
             if rank == 0:
                 print("No checkpoint found — starting from scratch.")
 
+    val_loader = None
     if cfg.online:
         tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer)
         vocab_size = len(tokenizer)
@@ -367,11 +443,25 @@ def train(cfg: TrainConfig) -> None:
         )
         if rank == 0:
             print(f"Data mode: ONLINE (streaming from HF)")
+            if cfg.val_shard_count > 0:
+                print("  WARN: --val-shard-count ignored in online mode")
     else:
         manifest = load_manifest(cfg.data_dir)
         seq_len = manifest["seq_len"]
         vocab_size = manifest["vocab_size"]
         use_loss_mask = manifest["save_loss_mask"]
+
+        total_shards = len(sorted(Path(cfg.data_dir).glob("input_ids_*.npy")))
+        if cfg.val_shard_count > 0:
+            if cfg.val_shard_count >= total_shards:
+                raise ValueError(
+                    f"val_shard_count ({cfg.val_shard_count}) must be < total shards ({total_shards})"
+                )
+            train_shard_indices = list(range(total_shards - cfg.val_shard_count))
+            val_shard_indices = list(range(total_shards - cfg.val_shard_count, total_shards))
+        else:
+            train_shard_indices = None
+            val_shard_indices = None
 
         dataset = PackedShardDataset(
             cfg.data_dir,
@@ -380,6 +470,7 @@ def train(cfg: TrainConfig) -> None:
             rank=rank,
             world_size=world_size,
             skip_samples=skip_samples,
+            shard_indices=train_shard_indices,
         )
         # num_workers > 0 causes SIGSEGV under DDP because DataLoader forks
         # after CUDA is initialised — safe to use workers only in single-GPU mode.
@@ -390,8 +481,31 @@ def train(cfg: TrainConfig) -> None:
             num_workers=safe_num_workers,
             pin_memory=("cuda" in str(device)),
         )
+
+        val_loader = None
+        if val_shard_indices is not None:
+            val_dataset = PackedShardDataset(
+                cfg.data_dir,
+                shuffle=False,
+                seed=cfg.seed,
+                rank=rank,
+                world_size=world_size,
+                skip_samples=0,
+                shard_indices=val_shard_indices,
+            )
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=cfg.batch_size,
+                num_workers=safe_num_workers,
+                pin_memory=("cuda" in str(device)),
+            )
         if rank == 0:
             print(f"Data mode: DISK (shards from {cfg.data_dir})")
+            if val_shard_indices is not None:
+                print(
+                    f"  Train shards: {len(train_shard_indices)} | "
+                    f"Val shards: {len(val_shard_indices)} (held out from end)"
+                )
 
     if cfg.pretrained_model:
         model = AutoModelForCausalLM.from_pretrained(
@@ -571,7 +685,14 @@ def train(cfg: TrainConfig) -> None:
             loss = masked_causal_loss(logits, y, loss_mask)
             loss = loss / cfg.grad_accum_steps
 
-        scaler.scale(loss).backward()
+        # Skip DDP all-reduce on non-boundary micro-batches; sync only on opt step.
+        sync_ctx = (
+            model.no_sync()
+            if (world_size > 1 and not is_step_boundary)
+            else contextlib.nullcontext()
+        )
+        with sync_ctx:
+            scaler.scale(loss).backward()
 
         if is_step_boundary:
             scaler.unscale_(optimizer)
@@ -613,6 +734,15 @@ def train(cfg: TrainConfig) -> None:
             )
             plot_loss_curve(metrics, os.path.join(cfg.output_dir, "loss_curve.png"))
 
+        if val_loader is not None and cfg.val_every > 0 and step > 0 and step % cfg.val_every == 0:
+            val_loss = _run_validation(
+                model, val_loader, device, use_bf16, bos_id, cfg.val_batches, world_size
+            )
+            if rank == 0:
+                metrics["val_steps"].append(step)
+                metrics["val_loss"].append(val_loss)
+                print(f"  Val loss @ step {step}: {val_loss:.4f}")
+
         if rank == 0 and cfg.save_every > 0 and step > 0 and step % cfg.save_every == 0:
             save_model = model.module if world_size > 1 else model
             ckpt_path = os.path.join(checkpoint_dir, f"step_{step}")
@@ -623,14 +753,20 @@ def train(cfg: TrainConfig) -> None:
             plot_metrics(metrics, cfg.output_dir)
             plot_loss_curve(metrics, os.path.join(cfg.output_dir, "loss_curve.png"))
 
-            # Save best checkpoint based on average loss over the last save_every steps
-            window = min(cfg.save_every, len(metrics["loss"]))
-            recent_loss = sum(metrics["loss"][-window:]) / window
+            # Save best checkpoint based on latest val loss when available;
+            # fall back to recent train-loss average if val is disabled.
+            if metrics.get("val_loss"):
+                recent_loss = metrics["val_loss"][-1]
+                metric_name = "val loss"
+            else:
+                window = min(cfg.save_every, len(metrics["loss"]))
+                recent_loss = sum(metrics["loss"][-window:]) / window
+                metric_name = "avg train loss"
             if recent_loss < best_loss:
                 best_loss = recent_loss
                 best_path = os.path.join(checkpoint_dir, "best")
                 save_model.save_pretrained(best_path)
-                print(f"  Best checkpoint updated → {best_path} (avg loss {best_loss:.4f})")
+                print(f"  Best checkpoint updated → {best_path} ({metric_name} {best_loss:.4f})")
 
             # Keep only the last 2 checkpoints (safety net for hard job kills)
             prev2_step = step - 2 * cfg.save_every

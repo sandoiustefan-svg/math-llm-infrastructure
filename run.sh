@@ -102,5 +102,8 @@ torchrun --nproc_per_node="$N_GPUS" scripts/python/train.py \
     --num-workers 4 \
     --save-every 10000 \
     --log-every 100 \
+    --val-shard-count 8 \
+    --val-every 500 \
+    --val-batches 32 \
     --bf16 \
     --resume
