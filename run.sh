@@ -100,7 +100,7 @@ torchrun --nproc_per_node="$N_GPUS" scripts/python/train.py \
     --steps 50000 \
     --warmup-steps 500 \
     --num-workers 4 \
-    --save-every 10000 \
+    --save-every 2500 \
     --log-every 100 \
     --val-shard-count 8 \
     --val-every 500 \
