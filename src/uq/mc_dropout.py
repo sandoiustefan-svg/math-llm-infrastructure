@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import torch
@@ -8,15 +9,17 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import math
 from src.uq.metrics import answer_entropy, answers_are_equal, token_probability_confidence
+from src.data.format_openmathinstruct2 import FormatConfig, format_openmathinstruct2_exmaple
 
 
 @dataclass
 class MCDropoutConfig:
     model_path: str
+    base_model: str
     tokenizer_name: str
     num_passes: int = 20
     max_new_tokens: int = 512
-    temperature: float = 1.0
+    mc_dropout_rate: float = 0.1
     device: str = "cuda"
 
 
@@ -24,11 +27,12 @@ class MCDropoutEvaluator:
     """
     Uncertainty quantification via Monte Carlo Dropout.
 
-    The scratch-trained model was trained with attention_dropout=0.1 and
-    hidden_dropout=0.1. Calling model.train() at inference keeps those dropout
-    masks active, so each forward pass produces a different stochastic prediction.
-    Running num_passes passes and measuring answer disagreement gives an estimate
-    of the model's epistemic uncertainty.
+    The LoRA fine-tune was trained with lora_dropout=0.1 plus an extra
+    nn.Dropout after the final RMSNorm (_add_mc_dropout_hook in trainer.py).
+    Both are re-activated by keeping the model in train() mode at inference,
+    so each greedy forward pass produces a different stochastic prediction.
+    Running num_passes passes and measuring answer disagreement gives an
+    estimate of the model's epistemic uncertainty.
     """
 
     def __init__(self, cfg: MCDropoutConfig):
@@ -38,27 +42,38 @@ class MCDropoutEvaluator:
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        self.model = AutoModelForCausalLM.from_pretrained(cfg.model_path)
+        base = AutoModelForCausalLM.from_pretrained(cfg.base_model, torch_dtype=torch.bfloat16)
+        if (Path(cfg.model_path) / "adapter_config.json").exists():
+            from peft import PeftModel
+            self.model = PeftModel.from_pretrained(base, cfg.model_path)
+        else:
+            self.model = base
         self.model.to(cfg.device)
+
+        if cfg.mc_dropout_rate > 0:
+            from src.training.trainer import _add_mc_dropout_hook
+            _add_mc_dropout_hook(self.model, cfg.mc_dropout_rate)
+
         # Keep dropout active — this is the key difference from standard inference.
         self.model.train()
+
+        self._eot_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
 
     @torch.no_grad()
     def _generate_once(self, input_ids: torch.Tensor) -> str:
         output_ids = self.model.generate(
             input_ids,
             max_new_tokens=self.cfg.max_new_tokens,
-            do_sample=(self.cfg.temperature > 0),
-            temperature=self.cfg.temperature,
+            do_sample=False,
             pad_token_id=self.tokenizer.pad_token_id,
-            repetition_penalty=1.3,
+            eos_token_id=[self.tokenizer.eos_token_id, self._eot_id],
         )
         new_tokens = output_ids[0, input_ids.shape[1]:]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True)
 
     @staticmethod
     def _extract_final_answer(text: str) -> str:
-        marker = "### Final Answer:"
+        marker = "Final Answer:"
         idx = text.find(marker)
         if idx == -1:
             return text.strip()
@@ -72,17 +87,12 @@ class MCDropoutEvaluator:
                 - "expected_answer" (str, optional — for correctness scoring)
 
         Returns:
-            list of dicts, one per problem:
-                - "problem": str
-                - "answers": list of N extracted answers (one per pass)
-                - "majority_answer": str
-                - "confidence": float  (fraction of passes matching majority)
-                - "entropy": float     (predictive entropy over answer distribution)
-                - "correct": bool | None
+            list of dicts, one per problem.
         """
+        _fmt = FormatConfig(include_final_answer=False, instruct_format=True)
         results = []
         for item in problems:
-            prompt = f"### Problem:\n{item['problem'].strip()}\n\n### Solution:\n"
+            prompt = format_openmathinstruct2_exmaple({"problem": item["problem"]}, _fmt)["prompt_text"]
             input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.cfg.device)
 
             answers = []
@@ -105,7 +115,6 @@ class MCDropoutEvaluator:
                 correct = answers_are_equal(majority, str(expected))
 
             # Token-level confidence averaged over all N passes.
-            # Computes all four confidence measures per pass, then averages.
             pass_confs = [
                 token_probability_confidence(self.model, self.tokenizer, prompt, raw, self.cfg.device)
                 for raw in raws
@@ -127,7 +136,7 @@ class MCDropoutEvaluator:
                 "full_sequence_perplexity":      _avg("full_sequence_perplexity"),
                 "full_sequence_min_token_prob":  _avg("full_sequence_min_token_prob"),
                 "full_sequence_std_token_prob":  _avg("full_sequence_std_token_prob"),
-                # Answer span only (tokens after ### Final Answer:)
+                # Answer span only (tokens after Final Answer:)
                 "answer_span_mean_confidence":   _avg("answer_span_mean_confidence"),
                 "answer_span_perplexity":        _avg("answer_span_perplexity"),
                 "answer_span_min_token_prob":    _avg("answer_span_min_token_prob"),
@@ -145,7 +154,7 @@ class MCDropoutEvaluator:
                 # Position-weighted token probability (Metric 6)
                 "weighted_mean_confidence":      _avg("weighted_mean_confidence"),
                 "weighted_perplexity":           _avg("weighted_perplexity"),
-                # Legacy key kept for backwards compatibility
+                # Legacy keys kept for backwards compatibility
                 "token_mean_confidence":         _avg("full_sequence_mean_confidence"),
                 "token_perplexity":              _avg("full_sequence_perplexity"),
                 "token_min_prob":                _avg("full_sequence_min_token_prob"),

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 _DIGIT_CHARS = set("0123456789")
-_ANSWER_MARKER = "### Final Answer:"
+_ANSWER_MARKER = "Final Answer:"
 
 # Weights for Metric 6 (position-weighted token probability).
 # Tokens are assigned a weight based on their region:
