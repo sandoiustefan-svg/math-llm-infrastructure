@@ -95,3 +95,21 @@ def load_or_build(source: str, out_path: Path, limit: int) -> list[dict]:
         return build_math(out_path, limit=limit)
     else:
         raise ValueError(f"Unknown test source: {source!r}")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Download and cache UQ test sets.")
+    ap.add_argument("--source", default="all",
+                    choices=["openmath_tail", "gsm8k", "math", "all"])
+    ap.add_argument("--out-dir", required=True,
+                    help="Directory to write <source>.jsonl files")
+    ap.add_argument("--limit", type=int, default=500,
+                    help="Max problems per set (0 = all; openmath_tail default is 500)")
+    args = ap.parse_args()
+
+    out_dir = Path(args.out_dir)
+    sources = ["openmath_tail", "gsm8k", "math"] if args.source == "all" else [args.source]
+    for src in sources:
+        load_or_build(src, out_dir / f"{src}.jsonl", limit=args.limit)

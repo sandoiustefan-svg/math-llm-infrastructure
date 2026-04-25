@@ -160,6 +160,8 @@ def main():
                     help="Max problems per test set (0 = all; for openmath_tail default 500 applies)")
     ap.add_argument("--ensemble-seeds", nargs="+", type=int, default=[42, 123, 456],
                     help="[ensemble] Training seeds whose checkpoints form the ensemble")
+    ap.add_argument("--test-sets-dir", default="",
+                    help="Directory for cached test-set JSONLs. Defaults to <data_dir>/../test_sets/")
     args = ap.parse_args()
 
     # --- Resolve cluster config ---
@@ -182,9 +184,13 @@ def main():
     if args.method == "mc_dropout" and not Path(ckpt_path).exists():
         sys.exit(f"Checkpoint not found: {ckpt_path}")
 
-    # Base dir for caching test sets and writing results
+    # Base dir for writing results; test sets sit next to the training data dir
     base_dir = Path(paths["base_dir"])
-    test_sets_dir = base_dir / "data" / "test_sets"
+    test_sets_dir = (
+        Path(args.test_sets_dir)
+        if args.test_sets_dir
+        else Path(paths["data_dir"]).parent / "test_sets"
+    )
 
     # --- Build evaluator once (loaded outside the source loop) ---
     if args.method == "mc_dropout":
