@@ -67,6 +67,7 @@ class MCDropoutEvaluator:
             do_sample=False,
             pad_token_id=self.tokenizer.pad_token_id,
             eos_token_id=[self.tokenizer.eos_token_id, self._eot_id],
+            repetition_penalty=1.3,
         )
         new_tokens = output_ids[0, input_ids.shape[1]:]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True)
@@ -93,7 +94,8 @@ class MCDropoutEvaluator:
         results = []
         for item in problems:
             prompt = format_openmathinstruct2_exmaple({"problem": item["problem"]}, _fmt)["prompt_text"]
-            input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.cfg.device)
+            # add_special_tokens=False: prompt string already contains <|begin_of_text|>
+            input_ids = self.tokenizer(prompt, return_tensors="pt", add_special_tokens=False).input_ids.to(self.cfg.device)
 
             answers = []
             raws = []

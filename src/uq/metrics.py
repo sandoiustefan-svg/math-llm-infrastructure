@@ -190,8 +190,9 @@ def token_probability_confidence(
         (each group has mean_confidence, perplexity, min_token_prob, std_token_prob)
     """
     full_text = prompt + answer
-    prompt_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
-    full_ids   = tokenizer(full_text, return_tensors="pt").input_ids.to(device)
+    # add_special_tokens=False: prompt already contains <|begin_of_text|>
+    prompt_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
+    full_ids   = tokenizer(full_text, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
 
     n_prompt = prompt_ids.shape[1]
     n_answer = full_ids.shape[1] - n_prompt
