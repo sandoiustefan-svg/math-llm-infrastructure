@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import math
 import os
 import shutil
 import time
@@ -50,6 +51,7 @@ class TrainConfig:
     batch_size: int = 8
     lr: float = 3e-4
     steps: int = 1000
+    epochs: float = 0.0  # if > 0, overrides steps (computed from dataset size)
     num_workers: int = 2
     fp16: bool = False   # float16 + GradScaler
     bf16: bool = False   # bfloat16, no GradScaler (preferred on A100)
@@ -462,6 +464,14 @@ def train(cfg: TrainConfig) -> None:
         else:
             train_shard_indices = None
             val_shard_indices = None
+
+        if cfg.epochs > 0:
+            train_shards = len(train_shard_indices) if train_shard_indices is not None else total_shards
+            train_seqs = train_shards * manifest["shard_num_seqs"]
+            steps_per_epoch = math.ceil(train_seqs / world_size / cfg.batch_size)
+            cfg.steps = math.ceil(cfg.epochs * steps_per_epoch)
+            if rank == 0:
+                print(f"Epochs mode: {cfg.epochs} epochs × {steps_per_epoch} steps/epoch = {cfg.steps} total steps")
 
         dataset = PackedShardDataset(
             cfg.data_dir,

@@ -35,6 +35,7 @@ def main():
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--steps", type=int, default=1000)
+    ap.add_argument("--epochs", type=float, default=0.0, help="Train for N epochs (overrides --steps if > 0)")
     ap.add_argument("--num-workers", type=int, default=2)
     ap.add_argument("--fp16", action="store_true", help="float16 mixed precision + GradScaler")
     ap.add_argument("--bf16", action="store_true", help="bfloat16 mixed precision (preferred on A100, no GradScaler)")
@@ -75,6 +76,7 @@ def main():
         batch_size=args.batch_size,
         lr=args.lr,
         steps=args.steps,
+        epochs=args.epochs,
         num_workers=args.num_workers,
         fp16=args.fp16,
         bf16=args.bf16,

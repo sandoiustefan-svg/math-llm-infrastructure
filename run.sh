@@ -29,6 +29,9 @@ print(f"OUTPUT_DIR={c['paths']['output_dir']}_seed${SEED}")
 print(f"HF_CACHE={c['paths']['hf_cache']}")
 print(f"CUDA_DEVICES={c['gpus']['cuda_devices']}")
 print(f"N_GPUS={c['gpus']['n_gpus']}")
+t = c.get('train', {})
+print(f"STEPS={t.get('steps', 50000)}")
+print(f"EPOCHS={t.get('epochs', 0)}")
 EOF
 )"
 
@@ -49,9 +52,13 @@ export HF_HOME="$HF_CACHE"
 BASE_MODEL="meta-llama/Llama-3.1-8B-Instruct"
 TOKENIZER="$BASE_MODEL"
 
-# A100s have 80GB — use larger batches for faster training
-# macross 3090s have 24GB — keep small batches
-if [[ "$CLUSTER" == a100* ]]; then
+# a100-3-mc = full 80GB GPU, can use larger batches
+# other A100s = MIG slices (20–40GB), keep moderate batches
+# macross 3090s = 24GB, keep small batches
+if [[ "$CLUSTER" == "a100-3-mc" ]]; then
+    BATCH_SIZE=32
+    GRAD_ACCUM=2
+elif [[ "$CLUSTER" == a100* ]]; then
     BATCH_SIZE=8
     GRAD_ACCUM=4
 else
@@ -59,8 +66,8 @@ else
     GRAD_ACCUM=16
 fi
 
-# MC Dropout on macross and a100-1 (fse-2a100-1), ensemble members have no dropout
-if [[ "$CLUSTER" == "macross" || "$CLUSTER" == "a100-1" ]]; then
+# MC Dropout on macross, a100-1, and a100-3-mc; ensemble members have no dropout
+if [[ "$CLUSTER" == "macross" || "$CLUSTER" == "a100-1" || "$CLUSTER" == "a100-3-mc" ]]; then
     MC_DROPOUT="--mc-dropout-rate 0.1"
 else
     MC_DROPOUT="--mc-dropout-rate 0.0"
@@ -97,7 +104,8 @@ torchrun --nproc_per_node="$N_GPUS" scripts/python/train.py \
     --batch-size "$BATCH_SIZE" \
     --grad-accum-steps "$GRAD_ACCUM" \
     --lr 2e-4 \
-    --steps 50000 \
+    --steps "$STEPS" \
+    --epochs "$EPOCHS" \
     --warmup-steps 500 \
     --num-workers 4 \
     --save-every 2500 \
