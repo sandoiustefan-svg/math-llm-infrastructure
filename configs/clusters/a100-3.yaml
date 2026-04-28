@@ -7,5 +7,5 @@ paths:
   hf_cache: /scratch/s5549329/.cache/huggingface
 
 gpus:
-  cuda_devices: "MIG-0fb6bae2-fd70-5e49-921b-9d8c9f43e593,MIG-5eaaabe9-dfae-59c1-bdbc-205f1e514960"
+  cuda_devices: "MIG-5eaaabe9-dfae-59c1-bdbc-205f1e514960,MIG-76de4d8d-dd90-510e-bc47-b5feb5c965b3"
   n_gpus: 2
