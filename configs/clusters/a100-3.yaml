@@ -9,3 +9,6 @@ paths:
 gpus:
   cuda_devices: "MIG-0fb6bae2-fd70-5e49-921b-9d8c9f43e593,MIG-5eaaabe9-dfae-59c1-bdbc-205f1e514960"
   n_gpus: 2
+
+train:
+  epochs: 3
