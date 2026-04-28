@@ -55,7 +55,7 @@ TOKENIZER="$BASE_MODEL"
 # a100-3-mc = full 80GB GPU, can use larger batches
 # other A100s = MIG slices (20–40GB), keep moderate batches
 # macross 3090s = 24GB, keep small batches
-if [[ "$CLUSTER" == "a100-3-mc" ]]; then
+if [[ "$CLUSTER" == "a100-3-mc" || "$CLUSTER" == "a100-1-full" ]]; then
     BATCH_SIZE=32
     GRAD_ACCUM=2
 elif [[ "$CLUSTER" == a100* ]]; then
@@ -67,7 +67,7 @@ else
 fi
 
 # MC Dropout on macross, a100-1, and a100-3-mc; ensemble members have no dropout
-if [[ "$CLUSTER" == "macross" || "$CLUSTER" == "a100-1" || "$CLUSTER" == "a100-3-mc" ]]; then
+if [[ "$CLUSTER" == "macross" || "$CLUSTER" == "a100-1" || "$CLUSTER" == "a100-1-full" || "$CLUSTER" == "a100-3-mc" || "$CLUSTER" == "a100-3" ]]; then
     MC_DROPOUT="--mc-dropout-rate 0.1"
 else
     MC_DROPOUT="--mc-dropout-rate 0.0"
