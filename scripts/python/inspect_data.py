@@ -18,7 +18,7 @@ from src.data.read_openmathinstruct2 import ReadConfig, iter_openmathinstruct2
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--split", default="train")
-    ap.add_argument("--limit", type=int, default=1000)
+    ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--skip", type=int, default=0)
     ap.add_argument("--output", type=Path, default=None,
                     help="Output path. Defaults to data/raw/inspect/raw/openmathinstruct2_{split}.jsonl")
@@ -29,7 +29,7 @@ def main():
 
     cfg = ReadConfig(
         split=args.split,
-        limit=args.limit,
+        limit=args.limit if args.limit > 0 else None,
         skip=args.skip
     )
 
