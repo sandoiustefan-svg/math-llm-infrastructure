@@ -564,7 +564,7 @@ def train(cfg: TrainConfig) -> None:
                   f"({trainable:,} / {total:,} params, {100*trainable/total:.1f}%)")
 
     if world_size > 1:
-        model = DDP(model, device_ids=[local_rank], find_unused_parameters=cfg.use_lora)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
 
     if cfg.mc_dropout_rate > 0 and cfg.pretrained_model:
         target = model.module if world_size > 1 else model

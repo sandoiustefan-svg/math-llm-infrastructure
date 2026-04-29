@@ -37,6 +37,7 @@ mkdir -p logs
 
 export CUDA_VISIBLE_DEVICES="$CUDA_DEVICES"
 export HF_HOME="$HF_CACHE"
+export NCCL_P2P_DISABLE=1   # RTX 3090s are PCIe-only; P2P causes large GPU memory allocation
 
 BASE_MODEL="meta-llama/Llama-3.1-8B-Instruct"
 TOKENIZER="$BASE_MODEL"
