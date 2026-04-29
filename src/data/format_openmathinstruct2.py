@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Any
-
+from typing import Dict, Any, List
 
 @dataclass(frozen=True)
 class FormatConfig:
@@ -10,53 +9,70 @@ class FormatConfig:
     Configuration for formatting OpenMathInstruct-2 examples.
 
     Attributes:
-        include_final_answer: Whether to append the final answer section.
-        instruct_format: If True, use LLaMA 3.1 Instruct chat template
-                         (<|start_header_id|> etc.). If False, use the
-                         legacy ### Problem / ### Solution format.
+        include_system_prompt: Whether to prepend a system message.
+        include_final_answer: Whether to append final answer separately.
+        system_prompt: Content of system prompt.
     """
+    include_system_prompt: bool = True
     include_final_answer: bool = True
-    instruct_format: bool = True
+    system_prompt: str = (
+        "You are a careful mathematical reasoning assistant. "
+        "Solve the problem step by step."
+    )
 
 
-def format_openmathinstruct2_exmaple(ex: Dict[str, Any], cfg: FormatConfig) -> Dict[str, str]:
+def format_openmathinstruct2_example(
+        ex: Dict[str, Any],
+        cfg: FormatConfig
+) -> Dict[str, Any]:
     """
-    Format a raw OpenMathInstruct-2 example into prompt and completion text.
+    Convert a raw OpenMathInstruct-2 example into Llama chat-style messages.
 
-    Returns a dictionary containing:
-        - prompt_text     (loss_mask = 0, not trained on)
-        - completion_text (loss_mask = 1, trained on)
-        - full_text       (prompt + completion)
+    Returns:
+        {
+            "messages": [...],
+            "prompt_messages": [...],
+            "completion_text": ...
+        }
+
+    prompt_messages:
+        messages before assistant answer (useful for inference)
+
+    completion_text:
+        assistant target text (useful for masking/loss)
     """
     problem = (ex.get("problem") or "").strip()
-    sol = (ex.get("generated_solution") or "").strip()
-    ans = (ex.get("expected_answer") or "").strip()
+    solution = (ex.get("generated_solution") or "").strip()
+    answer = (ex.get("expected_answer") or "").strip()
 
-    if cfg.instruct_format:
-        # LLaMA 3.1 Instruct native chat template
-        # <|begin_of_text|> acts as a per-example separator in packed sequences
-        prompt_text = (
-            "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
-            "You are a helpful math assistant. Solve the following problem step by step.<|eot_id|>"
-            "<|start_header_id|>user<|end_header_id|>\n\n"
-            f"{problem}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-        )
-        if cfg.include_final_answer and ans:
-            completion_text = f"{sol}\n\nFinal Answer: {ans}<|eot_id|>"
-        else:
-            completion_text = f"{sol}<|eot_id|>"
+    messages: List[Dict[str, str]] = []
+
+    if cfg.include_system_prompt:
+        messages.append({
+            "role": "system",
+            "content": cfg.system_prompt
+        })
+
+    messages.append({
+        "role": "user",
+        "content": problem
+    })
+
+    if cfg.include_final_answer and answer:
+        assistant_text = f"{solution}\n\nFinal Answer: {answer}"
     else:
-        # Legacy format (for base models or from-scratch training)
-        prompt_text = f"### Problem:\n{problem}\n\n"
-        if cfg.include_final_answer and ans:
-            completion_text = f"### Solution:\n{sol}\n\n### Final Answer:\n{ans}\n"
-        else:
-            completion_text = f"### Solution:\n{sol}\n"
+        assistant_text = solution
 
-    full_text = prompt_text + completion_text
+    messages.append({
+        "role": "assistant",
+        "content": assistant_text
+    })
+
+    prompt_messages = messages[:-1]
 
     return {
-        "prompt_text": prompt_text,
-        "completion_text": completion_text,
-        "full_text": full_text,
+        "messages": messages,
+        "prompt_messages": prompt_messages,
+        "completion_text": assistant_text,
     }
+

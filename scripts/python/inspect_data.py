@@ -1,26 +1,7 @@
 """
-Inspect OpenMathInstruct-2 dataset examples via streaming.
-
-This script provides a simple CLI utility to:
-- Load a specified dataset split (default: train)
-- Optionally skip the first N examples
-- Optionally limit the number of examples returned
-- Print formatted JSON previews of the examples
-
-The dataset is streamed using HuggingFace `datasets` to avoid
-loading the full dataset into memory. This makes it suitable
-for large-scale datasets and quick inspection on both local
-machines and HPC environments.
-
-Typical usage:
-
-    python scripts/python/inspect_data.py --limit 3
-    python scripts/python/inspect_data.py --skip 1000 --limit 5
-    python scripts/python/inspect_data.py --split validation
-
-This script is intended for debugging and understanding
-the dataset structure before preprocessing and tokenization.
+Download / inspect OpenMathInstruct-2 and save raw streamed data.
 """
+
 import sys
 from pathlib import Path
 
@@ -33,22 +14,48 @@ import json
 from src.utils.logging_utils import setup_logger
 from src.data.read_openmathinstruct2 import ReadConfig, iter_openmathinstruct2
 
-def main():
 
+def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--split", default="train")
-    ap.add_argument("--limit", type=int, default=5)
+    ap.add_argument("--limit", type=int, default=1000)
     ap.add_argument("--skip", type=int, default=0)
+    ap.add_argument("--output", type=Path, default=None,
+                    help="Output path. Defaults to data/raw/inspect/raw/openmathinstruct2_{split}.jsonl")
+
     args = ap.parse_args()
 
     logger = setup_logger("inspect_data")
-    logger.info("Starting inspection (split=%s, skip=%d, limit=%d)", args.split, args.skip, args.limit)
 
-    cfg = ReadConfig(split=args.split, limit=args.limit, skip=args.skip)
+    cfg = ReadConfig(
+        split=args.split,
+        limit=args.limit,
+        skip=args.skip
+    )
 
-    for i, ex in enumerate(iter_openmathinstruct2(cfg), start=1):
-        logger.info("------ Example %d ------", i)
-        logger.info(json.dumps(ex, ensure_ascii=False, indent=2)[:4000])
+    if args.output is not None:
+        output_file = args.output
+    else:
+        raw_dir = PROJECT_ROOT / "data" / "raw" / "inspect" / "raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        output_file = raw_dir / f"openmathinstruct2_{args.split}.jsonl"
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Saving data to %s", output_file)
+
+    count = 0
+
+    with open(output_file, "w", encoding="utf-8") as f:
+        for ex in iter_openmathinstruct2(cfg):
+            f.write(json.dumps(ex, ensure_ascii=False) + "\n")
+            count += 1
+
+            if count % 100 == 0:
+                logger.info("Saved %d examples", count)
+
+    logger.info("Finished. Total saved: %d", count)
+
 
 if __name__ == "__main__":
     main()
