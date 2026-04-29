@@ -7,8 +7,8 @@ paths:
   hf_cache: /home/bsandoiu/.cache/huggingface
 
 gpus:
-  cuda_devices: "1"   # single RTX 3090 24GB — 8B bf16 leaves no room for NCCL DDP
-  n_gpus: 1
+  cuda_devices: "1,2"   # 2x RTX 3090 24GB — 3B bf16 (~6GB) leaves plenty of room for NCCL DDP
+  n_gpus: 2
 
 train:
   epochs: 3
