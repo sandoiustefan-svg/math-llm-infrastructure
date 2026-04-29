@@ -5,91 +5,127 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(PROJECT_ROOT))
 
 import argparse
-from src.training.trainer import TrainConfig, train
+from src.training.trainer import TrainConfig, load_train_config, train
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Train a LLaMA model from scratch.")
-    ap.add_argument("--tokenizer", required=True)
-    ap.add_argument("--output-dir", default="outputs/training")
+    ap = argparse.ArgumentParser(description="Train/fine-tune a LLaMA model.")
 
-    # Data source
-    ap.add_argument("--data-dir", default="", help="Path to preprocessed shards (disk mode)")
-    ap.add_argument("--online", action="store_true", help="Stream from HF directly (no disk)")
-    ap.add_argument("--seq-len", type=int, default=1024)
-    ap.add_argument("--limit", type=int, default=0, help="0 = no limit (online mode only)")
+    ap.add_argument(
+        "--config",
+        type=str,
+        default="",
+        help="Path to YAML config file, e.g. configs/llama3_8b_qlora.yaml",
+    )
 
-    # Model (ignored when --pretrained-model is set)
-    ap.add_argument("--pretrained-model", default="", help="HF model ID or local path for fine-tuning (skips scratch init)")
-    ap.add_argument("--trainable-layers", type=int, default=0, help="Freeze all except last N transformer layers + norm + lm_head (0 = train all)")
-    ap.add_argument("--use-lora", action="store_true", help="Apply LoRA adapters (requires --pretrained-model)")
-    ap.add_argument("--lora-rank", type=int, default=16, help="LoRA rank r")
-    ap.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha scaling factor")
-    ap.add_argument("--lora-dropout", type=float, default=0.1, help="Dropout inside LoRA adapters")
-    ap.add_argument("--mc-dropout-rate", type=float, default=0.1, help="MC Dropout rate after final norm (0 = disabled)")
-    ap.add_argument("--n-layers", type=int, default=24)
-    ap.add_argument("--hidden-size", type=int, default=2048)
-    ap.add_argument("--n-heads", type=int, default=16)
+    # Optional overrides
+    ap.add_argument("--tokenizer", default=None)
+    ap.add_argument("--pretrained-model", default=None)
+    ap.add_argument("--output-dir", default=None)
+    ap.add_argument("--data-dir", default=None)
 
-    # Training
-    ap.add_argument("--batch-size", type=int, default=8)
-    ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--steps", type=int, default=1000)
-    ap.add_argument("--epochs", type=float, default=0.0, help="Train for N epochs (overrides --steps if > 0)")
-    ap.add_argument("--num-workers", type=int, default=2)
-    ap.add_argument("--fp16", action="store_true", help="float16 mixed precision + GradScaler")
-    ap.add_argument("--bf16", action="store_true", help="bfloat16 mixed precision (preferred on A100, no GradScaler)")
-    ap.add_argument("--warmup-steps", type=int, default=2000, help="Linear LR warmup steps")
-    ap.add_argument("--grad-accum-steps", type=int, default=1, help="Gradient accumulation steps")
-    ap.add_argument("--save-every", type=int, default=500)
-    ap.add_argument("--log-every", type=int, default=50)
-    ap.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
-    ap.add_argument("--seed", type=int, default=42, help="Random seed (use different seeds for ensemble members)")
+    ap.add_argument("--seq-len", type=int, default=None)
+    ap.add_argument("--batch-size", type=int, default=None)
+    ap.add_argument("--grad-accum-steps", type=int, default=None)
+    ap.add_argument("--lr", type=float, default=None)
+    ap.add_argument("--steps", type=int, default=None)
+    ap.add_argument("--epochs", type=float, default=None)
+    ap.add_argument("--num-workers", type=int, default=None)
 
-    # Validation
-    ap.add_argument("--val-shard-count", type=int, default=0, help="Hold out last K shards as val (0 = no val)")
-    ap.add_argument("--val-every", type=int, default=1000, help="Run val every N micro-batch steps")
-    ap.add_argument("--val-batches", type=int, default=50, help="Number of val batches per pass")
+    ap.add_argument("--fp16", action="store_true")
+    ap.add_argument("--bf16", action="store_true")
+
+    ap.add_argument("--use-lora", action="store_true")
+    ap.add_argument("--use-qlora", action="store_true")
+    ap.add_argument("--lora-rank", type=int, default=None)
+    ap.add_argument("--lora-alpha", type=int, default=None)
+    ap.add_argument("--lora-dropout", type=float, default=None)
+
+    ap.add_argument("--bnb-4bit-quant-type", default=None)
+    ap.add_argument("--bnb-4bit-compute-dtype", default=None)
+    ap.add_argument("--bnb-4bit-use-double-quant", action="store_true")
+
+    ap.add_argument("--mc-dropout-rate", type=float, default=None)
+
+    ap.add_argument("--warmup-steps", type=int, default=None)
+    ap.add_argument("--save-every", type=int, default=None)
+    ap.add_argument("--log-every", type=int, default=None)
+    ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--seed", type=int, default=None)
+
+    ap.add_argument("--val-shard-count", type=int, default=None)
+    ap.add_argument("--val-every", type=int, default=None)
+    ap.add_argument("--val-batches", type=int, default=None)
 
     args = ap.parse_args()
 
-    if not args.online and not args.data_dir:
-        ap.error("Either --data-dir or --online is required")
+    if args.config:
+        cfg = load_train_config(args.config)
+    else:
+        if args.tokenizer is None:
+            ap.error("--tokenizer is required when --config is not provided")
+        if args.data_dir is None:
+            ap.error("--data-dir is required when --config is not provided")
 
-    cfg = TrainConfig(
-        tokenizer=args.tokenizer,
-        pretrained_model=args.pretrained_model,
-        trainable_layers=args.trainable_layers,
-        use_lora=args.use_lora,
-        lora_rank=args.lora_rank,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        mc_dropout_rate=args.mc_dropout_rate,
-        output_dir=args.output_dir,
-        data_dir=args.data_dir,
-        online=args.online,
-        seq_len=args.seq_len,
-        limit=args.limit,
-        n_layers=args.n_layers,
-        hidden_size=args.hidden_size,
-        n_heads=args.n_heads,
-        batch_size=args.batch_size,
-        lr=args.lr,
-        steps=args.steps,
-        epochs=args.epochs,
-        num_workers=args.num_workers,
-        fp16=args.fp16,
-        bf16=args.bf16,
-        warmup_steps=args.warmup_steps,
-        grad_accum_steps=args.grad_accum_steps,
-        save_every=args.save_every,
-        log_every=args.log_every,
-        resume=args.resume,
-        seed=args.seed,
-        val_shard_count=args.val_shard_count,
-        val_every=args.val_every,
-        val_batches=args.val_batches,
-    )
+        cfg = TrainConfig(
+            tokenizer=args.tokenizer,
+            data_dir=args.data_dir,
+        )
+
+    overrides = {
+        "tokenizer": args.tokenizer,
+        "pretrained_model": args.pretrained_model,
+        "output_dir": args.output_dir,
+        "data_dir": args.data_dir,
+        "seq_len": args.seq_len,
+        "batch_size": args.batch_size,
+        "grad_accum_steps": args.grad_accum_steps,
+        "lr": args.lr,
+        "steps": args.steps,
+        "epochs": args.epochs,
+        "num_workers": args.num_workers,
+        "lora_rank": args.lora_rank,
+        "lora_alpha": args.lora_alpha,
+        "lora_dropout": args.lora_dropout,
+        "bnb_4bit_quant_type": args.bnb_4bit_quant_type,
+        "bnb_4bit_compute_dtype": args.bnb_4bit_compute_dtype,
+        "mc_dropout_rate": args.mc_dropout_rate,
+        "warmup_steps": args.warmup_steps,
+        "save_every": args.save_every,
+        "log_every": args.log_every,
+        "seed": args.seed,
+        "val_shard_count": args.val_shard_count,
+        "val_every": args.val_every,
+        "val_batches": args.val_batches,
+    }
+
+    for key, value in overrides.items():
+        if value is not None:
+            setattr(cfg, key, value)
+
+    if args.fp16:
+        cfg.fp16 = True
+        cfg.bf16 = False
+
+    if args.bf16:
+        cfg.bf16 = True
+        cfg.fp16 = False
+
+    if args.use_lora:
+        cfg.use_lora = True
+
+    if args.use_qlora:
+        cfg.use_qlora = True
+        cfg.use_lora = True
+
+    if args.bnb_4bit_use_double_quant:
+        cfg.bnb_4bit_use_double_quant = True
+
+    if args.resume:
+        cfg.resume = True
+
+    if not cfg.data_dir:
+        ap.error("data_dir is required. Set it in YAML or pass --data-dir.")
 
     train(cfg)
 

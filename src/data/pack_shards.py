@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterator, List, Tuple
 import numpy as np
 
 _NUMPY_DTYPES = {"int32": np.int32, "int64": np.int64}
-_MASK_DTYPE = np.int8  # loss_mask is binary 0/1, no need for int32
+_MASK_DTYPE = np.int8
 
 
 @dataclass(frozen=True)
@@ -31,38 +31,80 @@ def _iter_jsonl(path: Path) -> Iterator[Dict[str, Any]]:
 
 def _chunk_example(
     input_ids: List[int],
+    attention_mask: List[int],
     loss_mask: List[int],
     seq_len: int,
     pad_id: int,
-) -> List[Tuple[List[int], List[int]]]:
-    """Split one example into fixed-length (seq_len,) rows, padding the last.
-
-    Returns list of (input_ids_row, loss_mask_row). Pad positions get mask=0.
+) -> List[Tuple[List[int], List[int], List[int], int]]:
     """
+    Split one example into fixed-length rows.
+
+    Returns:
+        (input_ids_row, attention_mask_row, loss_mask_row, pad_len)
+
+    attention_mask:
+        1 = real token, including EOS
+        0 = artificial padding only
+
+    loss_mask:
+        1 = assistant/completion token
+        0 = prompt token or padding
+    """
+    if not (len(input_ids) == len(attention_mask) == len(loss_mask)):
+        raise ValueError(
+            "input_ids, attention_mask, and loss_mask must have the same length "
+            f"but got {len(input_ids)}, {len(attention_mask)}, {len(loss_mask)}"
+        )
+
     n = len(input_ids)
     num_chunks = max(1, math.ceil(n / seq_len))
+
     rows = []
+
     for i in range(num_chunks):
         start = i * seq_len
+
         chunk_ids = input_ids[start : start + seq_len]
-        chunk_mask = loss_mask[start : start + seq_len]
+        chunk_attention = attention_mask[start : start + seq_len]
+        chunk_loss = loss_mask[start : start + seq_len]
+
         pad_len = seq_len - len(chunk_ids)
-        rows.append((
-            chunk_ids + [pad_id] * pad_len,
-            chunk_mask + [0] * pad_len,
-        ))
+
+        rows.append(
+            (
+                chunk_ids + [pad_id] * pad_len,
+                chunk_attention + [0] * pad_len,
+                chunk_loss + [0] * pad_len,
+                pad_len,
+            )
+        )
+
     return rows
 
 
 def _flush_shard(
     id_rows: List[List[int]],
-    mask_rows: List[List[int]],
+    attention_rows: List[List[int]],
+    loss_rows: List[List[int]],
     shard_idx: int,
     cfg: PackShardsConfig,
 ) -> None:
     out = Path(cfg.out_dir)
-    np.save(out / f"input_ids_{shard_idx:05d}.npy", np.array(id_rows, dtype=_NUMPY_DTYPES[cfg.dtype]))
-    np.save(out / f"loss_mask_{shard_idx:05d}.npy", np.array(mask_rows, dtype=_MASK_DTYPE))
+
+    np.save(
+        out / f"input_ids_{shard_idx:05d}.npy",
+        np.array(id_rows, dtype=_NUMPY_DTYPES[cfg.dtype]),
+    )
+
+    np.save(
+        out / f"attention_mask_{shard_idx:05d}.npy",
+        np.array(attention_rows, dtype=_MASK_DTYPE),
+    )
+
+    np.save(
+        out / f"loss_mask_{shard_idx:05d}.npy",
+        np.array(loss_rows, dtype=_MASK_DTYPE),
+    )
 
 
 def pack_jsonl_to_shards(
@@ -71,17 +113,24 @@ def pack_jsonl_to_shards(
     tokenizer_name: str = "",
 ) -> dict:
     """
-    Stream tokenized JSONL, pack into fixed-shape .npy shards, write manifest.
+    Stream tokenized JSONL into fixed-shape .npy shards.
 
-    Each record must have 'input_ids' and 'loss_mask' lists of equal length.
-    loss_mask is 1 for tokens that contribute to loss, 0 for prompt/pad tokens.
-    Examples shorter than seq_len are padded; longer ones are hard-chunked
-    into multiple rows. Returns the manifest dict.
+    Each JSONL record must contain:
+        input_ids
+        attention_mask
+        loss_mask
+
+    Output:
+        input_ids_00000.npy
+        attention_mask_00000.npy
+        loss_mask_00000.npy
+        manifest.json
     """
     Path(cfg.out_dir).mkdir(parents=True, exist_ok=True)
 
     id_buf: List[List[int]] = []
-    mask_buf: List[List[int]] = []
+    attention_buf: List[List[int]] = []
+    loss_buf: List[List[int]] = []
 
     shard_idx = 0
     total_rows = 0
@@ -89,28 +138,56 @@ def pack_jsonl_to_shards(
     split_examples = 0
 
     for record in _iter_jsonl(input_jsonl):
+        attention_mask = record.get("attention_mask")
+
+        if attention_mask is None:
+            attention_mask = [1] * len(record["input_ids"])
+
         rows = _chunk_example(
-            record["input_ids"], record["loss_mask"], cfg.seq_len, cfg.pad_token_id
+            input_ids=record["input_ids"],
+            attention_mask=attention_mask,
+            loss_mask=record["loss_mask"],
+            seq_len=cfg.seq_len,
+            pad_id=cfg.pad_token_id,
         )
 
         if len(rows) > 1:
             split_examples += 1
 
-        for ids_row, mask_row in rows:
-            padded_tokens += ids_row.count(cfg.pad_token_id)
+        for ids_row, attention_row, loss_row, pad_len in rows:
+            padded_tokens += pad_len
+
             id_buf.append(ids_row)
-            mask_buf.append(mask_row)
+            attention_buf.append(attention_row)
+            loss_buf.append(loss_row)
 
             if len(id_buf) == cfg.shard_num_seqs:
-                _flush_shard(id_buf, mask_buf, shard_idx, cfg)
+                _flush_shard(
+                    id_rows=id_buf,
+                    attention_rows=attention_buf,
+                    loss_rows=loss_buf,
+                    shard_idx=shard_idx,
+                    cfg=cfg,
+                )
+
                 total_rows += cfg.shard_num_seqs
                 shard_idx += 1
+
                 id_buf = []
-                mask_buf = []
+                attention_buf = []
+                loss_buf = []
 
     final_shard_rows = cfg.shard_num_seqs
+
     if id_buf:
-        _flush_shard(id_buf, mask_buf, shard_idx, cfg)
+        _flush_shard(
+            id_rows=id_buf,
+            attention_rows=attention_buf,
+            loss_rows=loss_buf,
+            shard_idx=shard_idx,
+            cfg=cfg,
+        )
+
         final_shard_rows = len(id_buf)
         total_rows += final_shard_rows
         shard_idx += 1
@@ -125,6 +202,8 @@ def pack_jsonl_to_shards(
         "padded_tokens": padded_tokens,
         "split_examples": split_examples,
         "pad_token_id": cfg.pad_token_id,
+        "has_attention_mask": True,
+        "has_loss_mask": True,
         "tokenizer": tokenizer_name,
     }
 

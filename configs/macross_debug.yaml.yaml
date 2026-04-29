@@ -1,0 +1,52 @@
+cluster: macross
+
+hardware:
+  cuda_devices: "0,1"
+  n_gpus: 2
+
+paths:
+  base_dir: /home/bsandoiu/math-llm-infrastructure
+  data_dir: /home/bsandoiu/math-llm-infrastructure/data/processed/openmathinstruct2_debug/shards
+  output_dir: /home/bsandoiu/math-llm-infrastructure/outputs/debug_qlora_8b
+  hf_cache: /home/bsandoiu/.cache/huggingface
+
+model:
+  tokenizer: meta-llama/Meta-Llama-3.1-8B-Instruct
+  pretrained_model: meta-llama/Meta-Llama-3.1-8B-Instruct
+  seq_len: 512
+
+training:
+  batch_size: 1
+  grad_accum_steps: 2
+  lr: 0.0002
+  steps: 20
+  epochs: 0
+  num_workers: 0
+
+precision:
+  fp16: true
+  bf16: false
+
+lora:
+  use_lora: true
+  use_qlora: true
+  rank: 8
+  alpha: 16
+  dropout: 0.05
+
+qlora:
+  quant_type: nf4
+  compute_dtype: float16
+  double_quant: true
+
+logging:
+  warmup_steps: 2
+  save_every: 10
+  log_every: 1
+  resume: false
+  seed: 42
+
+validation:
+  val_shard_count: 0
+  val_every: 10
+  val_batches: 2
