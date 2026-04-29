@@ -43,7 +43,7 @@ BASE_MODEL="meta-llama/Llama-3.1-8B-Instruct"
 TOKENIZER="$BASE_MODEL"
 
 BATCH_SIZE=1
-GRAD_ACCUM=16
+GRAD_ACCUM=32
 MC_DROPOUT="--mc-dropout-rate 0.1"
 
 # Preprocess
