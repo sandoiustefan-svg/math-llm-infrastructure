@@ -9,3 +9,6 @@ paths:
 gpus:
   cuda_devices: "1,2"   # skip GPU 0 (RTX 5060 Ti, 16GB — too small for 8B)
   n_gpus: 2
+
+train:
+  epochs: 3

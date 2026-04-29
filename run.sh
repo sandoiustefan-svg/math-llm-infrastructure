@@ -1,23 +1,13 @@
 #!/bin/bash
-# Usage: bash run.sh [cluster] [seed]
-#   cluster : macross (default) | a100-1 | a100-2 | a100-3 | habrok
-#   seed    : random seed (default: 42)
+# Usage: bash run.sh [seed]
+#   seed : random seed (default: 42)
 # Examples:
-#   bash run.sh macross        # MC Dropout run, seed 42
-#   bash run.sh a100-1 42      # Ensemble member 1
-#   bash run.sh a100-2 123     # Ensemble member 2
-#   bash run.sh a100-3 456     # Ensemble member 3
+#   bash run.sh        # MC Dropout run, seed 42
+#   bash run.sh 7      # MC Dropout run, seed 7
 set -euo pipefail
 
-CLUSTER=${1:-macross}
-SEED=${2:-42}
-CONFIG="configs/clusters/${CLUSTER}.yaml"
-
-if [ ! -f "$CONFIG" ]; then
-    echo "Unknown cluster '${CLUSTER}'. Config not found: $CONFIG"
-    echo "Available: $(ls configs/clusters/*.yaml | xargs -n1 basename | sed 's/.yaml//')"
-    exit 1
-fi
+SEED=${1:-42}
+CONFIG="configs/clusters/macross.yaml"
 
 eval "$(python3 - <<EOF
 import yaml
@@ -35,7 +25,6 @@ print(f"EPOCHS={t.get('epochs', 0)}")
 EOF
 )"
 
-echo "Cluster  : $CLUSTER"
 echo "Seed     : $SEED"
 echo "Base dir : $BASE_DIR"
 echo "Data dir : $DATA_DIR"
@@ -52,26 +41,9 @@ export HF_HOME="$HF_CACHE"
 BASE_MODEL="meta-llama/Llama-3.1-8B-Instruct"
 TOKENIZER="$BASE_MODEL"
 
-# a100-3-mc = full 80GB GPU, can use larger batches
-# other A100s = MIG slices (20–40GB), keep moderate batches
-# macross 3090s = 24GB, keep small batches
-if [[ "$CLUSTER" == "a100-3-mc" || "$CLUSTER" == "a100-1-full" ]]; then
-    BATCH_SIZE=32
-    GRAD_ACCUM=2
-elif [[ "$CLUSTER" == a100* ]]; then
-    BATCH_SIZE=8
-    GRAD_ACCUM=4
-else
-    BATCH_SIZE=1
-    GRAD_ACCUM=16
-fi
-
-# MC Dropout on macross, a100-1, and a100-3-mc; ensemble members have no dropout
-if [[ "$CLUSTER" == "macross" || "$CLUSTER" == "a100-1" || "$CLUSTER" == "a100-1-full" || "$CLUSTER" == "a100-3-mc" || "$CLUSTER" == "a100-3" ]]; then
-    MC_DROPOUT="--mc-dropout-rate 0.1"
-else
-    MC_DROPOUT="--mc-dropout-rate 0.0"
-fi
+BATCH_SIZE=1
+GRAD_ACCUM=16
+MC_DROPOUT="--mc-dropout-rate 0.1"
 
 # Preprocess
 if [ -f "$DATA_DIR/manifest.json" ]; then
