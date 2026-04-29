@@ -520,7 +520,7 @@ def train(cfg: TrainConfig) -> None:
     if cfg.pretrained_model:
         model = AutoModelForCausalLM.from_pretrained(
             cfg.pretrained_model,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
         )
         seq_len = model.config.max_position_embeddings
