@@ -51,11 +51,8 @@ uncertainty:
                           # must be re-applied at inference with model.train() to keep it active
 
 validation:
-  # Fill these in after preprocessing finishes:
-  #   T = total shard count (ls $DATA_DIR/input_ids_*.npy | wc -l)
-  #   val_shard_count  = floor(0.10 * T)
-  #   test_shard_count = floor(0.10 * T)
-  val_shard_count:  0
-  test_shard_count: 0
+  # total=13646  train=10918 (80%)  val=1364 (10%)  test=1364 (10%)
+  val_shard_count:  1364
+  test_shard_count: 1364
   val_every:        2000
   val_batches:      50

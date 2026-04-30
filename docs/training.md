@@ -140,13 +140,13 @@ The split is persisted to `<output_dir>/splits.json` on rank 0 at startup:
 
 ```json
 {
-  "total_shards":        6840,
-  "data_dir":            "/home/.../shards",
+  "total_shards":        13646,
+  "data_dir":            "/home/bsandoiu/math-llm-infrastructure/data/processed/openmathinstruct2/shards",
   "shard_num_seqs":      1024,
   "pad_token_id":        128004,
-  "train_shard_indices": [0, 1, ..., 5471],
-  "val_shard_indices":   [5472, ..., 5755],
-  "test_shard_indices":  [5756, ..., 6839]
+  "train_shard_indices": [0, 1, ..., 10917],
+  "val_shard_indices":   [10918, ..., 12281],
+  "test_shard_indices":  [12282, ..., 13645]
 }
 ```
 
@@ -322,7 +322,7 @@ bash scripts/bash/train.sh configs/llama3_8b_qlora.yaml 42
   Experiment registered → exp_XXXXXXXX
 Data mode: DISK shards from .../shards
 Total shards: 6840
-Train shards: 5472 | Val shards: 342 | Test shards: 342 (held out)
+Train shards: 10918 | Val shards: 1364 | Test shards: 1364 (held out)
 Epochs mode: 1 epochs × ... steps/epoch = ... steps
 Loading pretrained model: meta-llama/Meta-Llama-3.1-8B-Instruct
 Training mode: QLoRA 4-bit
