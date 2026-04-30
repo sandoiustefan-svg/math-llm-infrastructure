@@ -71,7 +71,7 @@ def main() -> None:
     parser.add_argument(
         "--tokenizer",
         type=str,
-        default="meta-llama/Llama-3.2-1B",
+        default="meta-llama/Meta-Llama-3.1-8B-Instruct",
         help="Tokenizer name, used only to look up pad_token_id.",
     )
     parser.add_argument(

@@ -39,7 +39,7 @@ def main() -> None:
     parser.add_argument(
         "--model-name-or-path",
         type=str,
-        default="meta-llama/Llama-3.1-8B-Instruct",
+        default="meta-llama/Meta-Llama-3.1-8B-Instruct",
     )
 
     parser.add_argument(

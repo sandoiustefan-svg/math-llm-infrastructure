@@ -107,23 +107,23 @@ def _flush_shard(
     )
 
 
-def pack_jsonl_to_shards(
-    input_jsonl: Path,
+def stream_to_shards(
+    records: Iterator[Dict[str, Any]],
     cfg: PackShardsConfig,
     tokenizer_name: str = "",
 ) -> dict:
     """
-    Stream tokenized JSONL into fixed-shape .npy shards.
+    Write an iterator of tokenized records directly to .npy shards.
 
-    Each JSONL record must contain:
-        input_ids
-        attention_mask
-        loss_mask
+    Each record must contain:
+        input_ids      List[int]
+        loss_mask      List[int]
+        attention_mask List[int]  (optional; defaults to all-ones)
 
-    Output:
-        input_ids_00000.npy
-        attention_mask_00000.npy
-        loss_mask_00000.npy
+    Output files written to cfg.out_dir:
+        input_ids_XXXXX.npy
+        attention_mask_XXXXX.npy
+        loss_mask_XXXXX.npy
         manifest.json
     """
     Path(cfg.out_dir).mkdir(parents=True, exist_ok=True)
@@ -137,7 +137,7 @@ def pack_jsonl_to_shards(
     padded_tokens = 0
     split_examples = 0
 
-    for record in _iter_jsonl(input_jsonl):
+    for record in records:
         attention_mask = record.get("attention_mask")
 
         if attention_mask is None:
@@ -211,3 +211,16 @@ def pack_jsonl_to_shards(
         json.dump(manifest, f, indent=2)
 
     return manifest
+
+
+def pack_jsonl_to_shards(
+    input_jsonl: Path,
+    cfg: PackShardsConfig,
+    tokenizer_name: str = "",
+) -> dict:
+    """
+    Pack a tokenized JSONL file into fixed-shape .npy shards.
+
+    Thin wrapper around stream_to_shards that reads from a JSONL file.
+    """
+    return stream_to_shards(_iter_jsonl(input_jsonl), cfg, tokenizer_name)

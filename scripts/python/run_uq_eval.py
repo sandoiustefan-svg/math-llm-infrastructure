@@ -149,7 +149,7 @@ def main():
                     choices=["openmath_tail", "gsm8k", "math", "all"])
     ap.add_argument("--seed", type=int, default=42,
                     help="Training seed — used to locate output_dir_seed{N}/checkpoints/final")
-    ap.add_argument("--base-model", default="meta-llama/Llama-3.1-8B-Instruct",
+    ap.add_argument("--base-model", default="meta-llama/Meta-Llama-3.1-8B-Instruct",
                     help="HF id of the base model (adapter is loaded on top of this)")
     ap.add_argument("--num-passes", type=int, default=20,
                     help="[mc_dropout] Number of stochastic forward passes per problem")

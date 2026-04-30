@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import yaml
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 try:
@@ -83,6 +83,7 @@ class TrainConfig:
     resume: bool = False
 
     val_shard_count: int = 0
+    test_shard_count: int = 0
     val_every: int = 1000
     val_batches: int = 50
 
@@ -589,17 +590,52 @@ def train(cfg: TrainConfig) -> None:
             "Rerun preprocessing with the updated pack_shards.py."
         )
 
-    if cfg.val_shard_count > 0:
-        if cfg.val_shard_count >= total_shards:
+    total_holdout = cfg.val_shard_count + cfg.test_shard_count
+
+    if total_holdout > 0:
+        if total_holdout >= total_shards:
             raise ValueError(
-                f"val_shard_count={cfg.val_shard_count} must be smaller than total_shards={total_shards}"
+                f"val + test shards ({total_holdout}) must be smaller than total_shards ({total_shards})"
             )
 
-        train_shard_indices = list(range(total_shards - cfg.val_shard_count))
-        val_shard_indices = list(range(total_shards - cfg.val_shard_count, total_shards))
+        test_start = total_shards - cfg.test_shard_count
+        val_start = test_start - cfg.val_shard_count
+
+        train_shard_indices = list(range(0, val_start))
+        val_shard_indices = (
+            list(range(val_start, test_start)) if cfg.val_shard_count > 0 else None
+        )
+        test_shard_indices = (
+            list(range(test_start, total_shards)) if cfg.test_shard_count > 0 else None
+        )
+
+        all_indices = list(train_shard_indices)
+        if val_shard_indices is not None:
+            all_indices.extend(val_shard_indices)
+        if test_shard_indices is not None:
+            all_indices.extend(test_shard_indices)
+        assert len(set(all_indices)) == len(all_indices), "shard splits overlap"
+        assert sorted(all_indices) == list(range(total_shards)), "shard splits do not cover dataset"
     else:
         train_shard_indices = None
         val_shard_indices = None
+        test_shard_indices = None
+
+    if rank == 0:
+        os.makedirs(cfg.output_dir, exist_ok=True)
+        splits_path = os.path.join(cfg.output_dir, "splits.json")
+        splits = {
+            "total_shards": total_shards,
+            "data_dir": str(cfg.data_dir),
+            "shard_num_seqs": int(manifest.get("shard_num_seqs", 0)),
+            "pad_token_id": manifest.get("pad_token_id"),
+            "train_shard_indices": train_shard_indices,
+            "val_shard_indices": val_shard_indices,
+            "test_shard_indices": test_shard_indices,
+        }
+        with open(splits_path, "w", encoding="utf-8") as f:
+            json.dump(splits, f, indent=2)
+        print(f"  Splits saved → {splits_path}")
 
     if cfg.epochs > 0:
         train_shards = len(train_shard_indices) if train_shard_indices is not None else total_shards
@@ -617,16 +653,31 @@ def train(cfg: TrainConfig) -> None:
         shard_indices=train_shard_indices,
     )
 
+    train_sampler = (
+        DistributedSampler(
+            train_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True,
+            drop_last=True,
+            seed=cfg.seed,
+        )
+        if world_size > 1
+        else None
+    )
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg.batch_size,
-        shuffle=True,
+        sampler=train_sampler,
+        shuffle=(train_sampler is None),
         num_workers=safe_num_workers,
         pin_memory=("cuda" in str(device)),
         drop_last=True,
     )
 
     val_loader = None
+    val_sampler = None
 
     if val_shard_indices is not None:
         val_dataset = NpyShardDataset(
@@ -634,9 +685,22 @@ def train(cfg: TrainConfig) -> None:
             shard_indices=val_shard_indices,
         )
 
+        val_sampler = (
+            DistributedSampler(
+                val_dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=False,
+                drop_last=False,
+            )
+            if world_size > 1
+            else None
+        )
+
         val_loader = DataLoader(
             val_dataset,
             batch_size=cfg.batch_size,
+            sampler=val_sampler,
             shuffle=False,
             num_workers=safe_num_workers,
             pin_memory=("cuda" in str(device)),
@@ -646,8 +710,13 @@ def train(cfg: TrainConfig) -> None:
     if rank == 0:
         print(f"Data mode: DISK shards from {cfg.data_dir}")
         print(f"Total shards: {total_shards}")
-        if val_shard_indices is not None:
-            print(f"Train shards: {len(train_shard_indices)} | Val shards: {len(val_shard_indices)}")
+        train_count = len(train_shard_indices) if train_shard_indices is not None else total_shards
+        val_count = len(val_shard_indices) if val_shard_indices is not None else 0
+        test_count = len(test_shard_indices) if test_shard_indices is not None else 0
+        print(
+            f"Train shards: {train_count} | Val shards: {val_count} | "
+            f"Test shards: {test_count} (held out)"
+        )
 
     if cfg.pretrained_model:
         model = _load_pretrained_model(cfg, local_rank, resume_state_path)
@@ -787,6 +856,9 @@ def train(cfg: TrainConfig) -> None:
 
     best_loss = float("inf")
     samples_consumed = skip_samples
+    epoch_idx = 0
+    if train_sampler is not None:
+        train_sampler.set_epoch(epoch_idx)
     data_iter = iter(train_loader)
 
     train_start = time.time()
@@ -799,6 +871,9 @@ def train(cfg: TrainConfig) -> None:
         try:
             batch = next(data_iter)
         except StopIteration:
+            epoch_idx += 1
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch_idx)
             data_iter = iter(train_loader)
             batch = next(data_iter)
 

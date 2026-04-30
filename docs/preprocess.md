@@ -20,8 +20,9 @@ tokens.jsonl       {input_ids, attention_mask, loss_mask}
     │
     ▼  Step 4 — pack_data.py
 shards/
-  input_ids_00000.npy   shape (shard_num_seqs, seq_len)  dtype int32
-  loss_mask_00000.npy   shape (shard_num_seqs, seq_len)  dtype int8
+  input_ids_00000.npy        shape (shard_num_seqs, seq_len)  dtype int32
+  attention_mask_00000.npy   shape (shard_num_seqs, seq_len)  dtype int8
+  loss_mask_00000.npy        shape (shard_num_seqs, seq_len)  dtype int8
   ...
   manifest.json
 ```
@@ -148,7 +149,7 @@ Each tokenized example in the output:
 }
 ```
 
-`attention_mask` is all 1s at this stage because there is no padding — every token is real. Padding happens in step 4.
+`attention_mask` is all 1s at this stage because there is no padding — every token is real, including the terminal `<|eot_id|>`. Although LLaMA sets `pad_token = eos_token`, the EOS here is a genuine end-of-sequence marker, not padding. It is deliberately kept as `attention_mask = 1` so the model learns to predict it. Padding (and the corresponding `attention_mask = 0`) is introduced only in step 4.
 
 If `--max-length` is set (default 4096), sequences are **truncated** to that length. The truncation happens on the full sequence, so very long solutions may be cut off. This is the only case where content is lost.
 
@@ -167,9 +168,19 @@ This step converts the variable-length tokenized examples into fixed-shape NumPy
 
 Each example is placed into one or more **rows** of shape `(seq_len,)`:
 
-- **Short example** (`len < seq_len`): padded to `seq_len` with `pad_token_id`. Pad positions get `loss_mask = 0`.
+- **Short example** (`len < seq_len`): padded to `seq_len` with `pad_token_id`. Pad positions get `attention_mask = 0` and `loss_mask = 0`.
 - **Exact fit** (`len == seq_len`): one row, no padding.
 - **Long example** (`len > seq_len`): **hard-chunked** into `ceil(len / seq_len)` rows. The last chunk is padded. No overlap between chunks. No examples are dropped.
+
+The `attention_mask` encodes exactly one distinction: **real tokens** (including EOS) vs **artificial padding**. It does not mask prompt tokens — that role belongs to `loss_mask`.
+
+```
+attention_mask: 1 = real token (including the terminal <|eot_id|>)
+                0 = artificial pad token appended to fill seq_len
+
+loss_mask:      1 = assistant/completion token (model learns to predict these)
+                0 = prompt token or padding (excluded from loss)
+```
 
 ```
 Example length = 700, seq_len = 512:
@@ -182,11 +193,12 @@ Split examples (those that produce more than one row) are counted in `manifest.j
 
 ### Shard Files
 
-Rows are buffered in memory. Once the buffer reaches `shard_num_seqs` rows, it is flushed to disk as a pair of NumPy files:
+Rows are buffered in memory. Once the buffer reaches `shard_num_seqs` rows, it is flushed to disk as three NumPy files:
 
 ```
-input_ids_00000.npy   shape: (shard_num_seqs, seq_len)   dtype: int32
-loss_mask_00000.npy   shape: (shard_num_seqs, seq_len)   dtype: int8
+input_ids_00000.npy        shape: (shard_num_seqs, seq_len)   dtype: int32
+attention_mask_00000.npy   shape: (shard_num_seqs, seq_len)   dtype: int8
+loss_mask_00000.npy        shape: (shard_num_seqs, seq_len)   dtype: int8
 ```
 
 The final shard may have fewer than `shard_num_seqs` rows if the total number of rows is not a multiple of `shard_num_seqs`. Its actual size is recorded in `manifest.json` under `final_shard_rows`.
@@ -197,20 +209,22 @@ A `manifest.json` is written alongside the shards:
 
 ```json
 {
-  "seq_len":          2048,
-  "shard_num_seqs":   1024,
-  "dtype":            "int32",
-  "num_shards":       137,
-  "total_rows":       140250,
-  "final_shard_rows": 378,
-  "padded_tokens":    8273441,
-  "split_examples":   3821,
-  "pad_token_id":     128009,
-  "tokenizer":        "meta-llama/Llama-3.2-1B-Instruct"
+  "seq_len":            2048,
+  "shard_num_seqs":     1024,
+  "dtype":              "int32",
+  "num_shards":         137,
+  "total_rows":         140250,
+  "final_shard_rows":   378,
+  "padded_tokens":      8273441,
+  "split_examples":     3821,
+  "pad_token_id":       128009,
+  "has_attention_mask": true,
+  "has_loss_mask":      true,
+  "tokenizer":          "meta-llama/Llama-3.2-1B-Instruct"
 }
 ```
 
-The training dataset class (`PackedShardDataset`) reads this manifest to discover all shards, their shapes, and how to split them across DDP ranks.
+The training dataset class (`NpyShardDataset`) reads this manifest to discover all shards and their shapes. It expects all three file families (`input_ids_*.npy`, `attention_mask_*.npy`, `loss_mask_*.npy`) to be present and equal in count. The trainer validates `has_attention_mask: true` at startup and raises if the flag is missing.
 
 ---
 
@@ -222,7 +236,8 @@ The training dataset class (`PackedShardDataset`) reads this manifest to discove
 | `formatted.jsonl` | variable | Chat messages with roles |
 | `tokens.jsonl` | variable | `input_ids`, `attention_mask`, `loss_mask` as integer lists |
 | `input_ids_XXXXX.npy` | `(S, L)` int32 | Token IDs; S = shard_num_seqs, L = seq_len |
-| `loss_mask_XXXXX.npy` | `(S, L)` int8 | Binary mask; 1 = compute loss, 0 = ignore |
+| `attention_mask_XXXXX.npy` | `(S, L)` int8 | 1 = real token (incl. EOS), 0 = artificial padding |
+| `loss_mask_XXXXX.npy` | `(S, L)` int8 | 1 = compute loss (completion tokens), 0 = ignore |
 | `manifest.json` | JSON | Shard index and metadata |
 
 ---

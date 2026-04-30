@@ -47,12 +47,15 @@ print(f"BNB_4BIT_QUANT_TYPE={c['qlora'].get('quant_type', 'nf4')}")
 print(f"BNB_4BIT_COMPUTE_DTYPE={c['qlora'].get('compute_dtype', 'float16')}")
 print(f"BNB_4BIT_USE_DOUBLE_QUANT={str(c['qlora'].get('double_quant', True)).lower()}")
 
+print(f"MC_DROPOUT_RATE={c.get('uncertainty', {}).get('mc_dropout_rate', 0.0)}")
+
 print(f"WARMUP_STEPS={c['logging'].get('warmup_steps', 100)}")
 print(f"SAVE_EVERY={c['logging'].get('save_every', 500)}")
 print(f"LOG_EVERY={c['logging'].get('log_every', 20)}")
 print(f"RESUME={str(c['logging'].get('resume', False)).lower()}")
 
 print(f"VAL_SHARD_COUNT={c['validation'].get('val_shard_count', 1)}")
+print(f"TEST_SHARD_COUNT={c['validation'].get('test_shard_count', 0)}")
 print(f"VAL_EVERY={c['validation'].get('val_every', 500)}")
 print(f"VAL_BATCHES={c['validation'].get('val_batches', 50)}")
 EOF
@@ -124,9 +127,10 @@ cfg = {
     "bnb_4bit_compute_dtype": "$BNB_4BIT_COMPUTE_DTYPE",
     "bnb_4bit_use_double_quant": "$BNB_4BIT_USE_DOUBLE_QUANT" == "true",
 
-    "mc_dropout_rate": 0.0,
+    "mc_dropout_rate": float("$MC_DROPOUT_RATE"),
 
     "val_shard_count": int("$VAL_SHARD_COUNT"),
+    "test_shard_count": int("$TEST_SHARD_COUNT"),
     "val_every": int("$VAL_EVERY"),
     "val_batches": int("$VAL_BATCHES"),
 }

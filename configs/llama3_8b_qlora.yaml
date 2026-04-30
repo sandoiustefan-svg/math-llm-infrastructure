@@ -5,46 +5,57 @@ hardware:
   n_gpus: 2
 
 paths:
-  data_dir: /home/bsandoiu/math-llm-infrastructure/data/processed/openmathinstruct2/shards
+  base_dir:   /home/bsandoiu/math-llm-infrastructure
+  hf_cache:   /home/bsandoiu/.cache/huggingface
+  data_dir:   /home/bsandoiu/math-llm-infrastructure/data/processed/openmathinstruct2/shards
   output_dir: /home/bsandoiu/math-llm-infrastructure/outputs/qlora_8b
 
 model:
-  tokenizer: meta-llama/Meta-Llama-3.1-8B-Instruct
+  tokenizer:        meta-llama/Meta-Llama-3.1-8B-Instruct
   pretrained_model: meta-llama/Meta-Llama-3.1-8B-Instruct
-  seq_len: 2048
+  seq_len:          2048
 
 training:
-  batch_size: 1
-  grad_accum_steps: 16
-  lr: 0.0002
-  steps: 10000
-  epochs: 3
-  num_workers: 2
+  batch_size:       1
+  grad_accum_steps: 32
+  lr:               0.0002
+  steps:            0          # ignored when epochs > 0
+  epochs:           1
+  num_workers:      2
 
 precision:
-  fp16: true
-  bf16: false
+  fp16: false
+  bf16: true
 
 lora:
-  use_lora: true
+  use_lora:  true
   use_qlora: true
-  rank: 16
-  alpha: 32
-  dropout: 0.05
+  rank:      16
+  alpha:     32
+  dropout:   0.05
 
 qlora:
-  quant_type: nf4
-  compute_dtype: float16
-  double_quant: true
+  quant_type:    nf4
+  compute_dtype: bfloat16
+  double_quant:  true
 
 logging:
-  warmup_steps: 100
-  save_every: 500
-  log_every: 20
-  resume: false
-  seed: 42
+  warmup_steps: 3000
+  save_every:   2000
+  log_every:    50
+  resume:       false
+  seed:         42
+
+uncertainty:
+  mc_dropout_rate: 0.1   # dropout rate for the MC-dropout hook (after final LayerNorm)
+                          # must be re-applied at inference with model.train() to keep it active
 
 validation:
-  val_shard_count: 1
-  val_every: 500
-  val_batches: 50
+  # Fill these in after preprocessing finishes:
+  #   T = total shard count (ls $DATA_DIR/input_ids_*.npy | wc -l)
+  #   val_shard_count  = floor(0.10 * T)
+  #   test_shard_count = floor(0.10 * T)
+  val_shard_count:  0
+  test_shard_count: 0
+  val_every:        2000
+  val_batches:      50
