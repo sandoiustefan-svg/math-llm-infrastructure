@@ -220,7 +220,7 @@ A `manifest.json` is written alongside the shards:
   "pad_token_id":       128009,
   "has_attention_mask": true,
   "has_loss_mask":      true,
-  "tokenizer":          "meta-llama/Llama-3.2-1B-Instruct"
+  "tokenizer":          "meta-llama/Meta-Llama-3.1-8B-Instruct"
 }
 ```
 
