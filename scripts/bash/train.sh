@@ -43,9 +43,9 @@ print(f"LORA_RANK={c['lora'].get('rank', 16)}")
 print(f"LORA_ALPHA={c['lora'].get('alpha', 32)}")
 print(f"LORA_DROPOUT={c['lora'].get('dropout', 0.05)}")
 
-print(f"BNB_4BIT_QUANT_TYPE={c['qlora'].get('quant_type', 'nf4')}")
-print(f"BNB_4BIT_COMPUTE_DTYPE={c['qlora'].get('compute_dtype', 'float16')}")
-print(f"BNB_4BIT_USE_DOUBLE_QUANT={str(c['qlora'].get('double_quant', True)).lower()}")
+print(f"BNB_4BIT_QUANT_TYPE={c.get('qlora', {}).get('quant_type', 'nf4')}")
+print(f"BNB_4BIT_COMPUTE_DTYPE={c.get('qlora', {}).get('compute_dtype', 'bfloat16')}")
+print(f"BNB_4BIT_USE_DOUBLE_QUANT={str(c.get('qlora', {}).get('double_quant', True)).lower()}")
 
 print(f"MC_DROPOUT_RATE={c.get('uncertainty', {}).get('mc_dropout_rate', 0.0)}")
 
