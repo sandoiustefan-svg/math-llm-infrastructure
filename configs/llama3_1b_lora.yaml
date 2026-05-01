@@ -8,7 +8,7 @@ paths:
   base_dir:   /home/bsandoiu/math-llm-infrastructure
   hf_cache:   /home/bsandoiu/.cache/huggingface
   data_dir:   /home/bsandoiu/math-llm-infrastructure/data/processed/openmathinstruct2/shards
-  output_dir: /home/bsandoiu/math-llm-infrastructure/outputs/qlora_1b
+  output_dir: /home/bsandoiu/math-llm-infrastructure/outputs/lora_1b
 
 model:
   tokenizer:        meta-llama/Llama-3.2-1B-Instruct
@@ -19,8 +19,8 @@ training:
   batch_size:       1
   grad_accum_steps: 32
   lr:               0.0002
-  steps:            1100000    # ~20% of one epoch (2.1B tokens/GPU); ~5-6 days on 2x RTX 3090
-  epochs:           0          # steps mode
+  steps:            1100000    # ~20% of one epoch (~4-4.5 days on 2x RTX 3090)
+  epochs:           0
   num_workers:      2
 
 precision:
@@ -29,28 +29,22 @@ precision:
 
 lora:
   use_lora:  true
-  use_qlora: true
+  use_qlora: false             # plain LoRA — 1B fits in bf16, no quantization needed
   rank:      16
   alpha:     32
   dropout:   0.05
 
-qlora:
-  quant_type:    nf4
-  compute_dtype: bfloat16
-  double_quant:  true
-
 logging:
-  warmup_steps: 1000          # ~3% of 34k optimizer steps
+  warmup_steps: 1000
   save_every:   2000
   log_every:    50
   resume:       false
   seed:         42
 
 uncertainty:
-  mc_dropout_rate: 0.1        # same rate used at MC-dropout inference
+  mc_dropout_rate: 0.1
 
 validation:
-  # same val/test split as the 8B run — identical held-out shards
   val_shard_count:  1364
   test_shard_count: 1364
   val_every:        2000
