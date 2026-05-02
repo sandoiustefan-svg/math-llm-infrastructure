@@ -1,10 +1,9 @@
-"""Regenerate loss_curve.png and training_metrics.png from a saved metrics.json."""
+"""Regenerate training_metrics.png from a saved metrics.json."""
 
 import argparse
 import json
+import os
 from pathlib import Path
-
-from src.training.trainer import plot_loss_curve, plot_metrics
 
 
 def main() -> None:
@@ -24,8 +23,64 @@ def main() -> None:
     with metrics_path.open("r", encoding="utf-8") as f:
         metrics = json.load(f)
 
-    plot_metrics(metrics, str(out_dir))
-    plot_loss_curve(metrics, str(out_dir / "loss_curve.png"))
+    if not metrics.get("steps"):
+        print("No steps in metrics — nothing to plot.")
+        return
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    window = max(1, len(metrics["loss"]) // 50)
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle("Training Metrics", fontsize=16, fontweight="bold")
+
+    ax = axes[0, 0]
+    ax.plot(metrics["steps"], metrics["loss"], linewidth=0.8, alpha=0.4)
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Loss")
+    ax.set_title("Training Loss")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[0, 1]
+    ax.plot(metrics["steps"], metrics["loss"], linewidth=0.8, alpha=0.4)
+    ax.set_yscale("log")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Loss (log)")
+    ax.set_title("Training Loss Log Scale")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 0]
+    ax.plot(metrics["steps"], metrics["lr"], linewidth=1.5)
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Learning Rate")
+    ax.set_title("Learning Rate")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 1]
+    if metrics.get("tokens_per_sec"):
+        ax.plot(metrics["steps"], metrics["tokens_per_sec"], linewidth=0.8, alpha=0.4)
+        if len(metrics["tokens_per_sec"]) > window:
+            smoothed = [
+                sum(metrics["tokens_per_sec"][max(0, i - window): i + 1])
+                / len(metrics["tokens_per_sec"][max(0, i - window): i + 1])
+                for i in range(len(metrics["tokens_per_sec"]))
+            ]
+            ax.plot(metrics["steps"], smoothed, linewidth=2)
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Tokens/sec")
+    ax.set_title("Throughput")
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plot_path = out_dir / "training_metrics.png"
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"Plot saved → {plot_path}")
 
 
 if __name__ == "__main__":
