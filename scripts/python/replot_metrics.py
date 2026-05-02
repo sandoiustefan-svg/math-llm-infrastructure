@@ -31,25 +31,36 @@ def main() -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    window = max(1, len(metrics["loss"]) // 50)
+    loss = metrics["loss"]
+    steps = metrics["steps"]
+    window = max(1, len(loss) // 50)
+
+    smoothed = [
+        sum(loss[max(0, i - window): i + 1]) / len(loss[max(0, i - window): i + 1])
+        for i in range(len(loss))
+    ]
+
+    val_steps = metrics.get("val_steps", [])
+    val_loss = metrics.get("val_loss", [])
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle("Training Metrics", fontsize=16, fontweight="bold")
 
-    ax = axes[0, 0]
-    ax.plot(metrics["steps"], metrics["loss"], linewidth=0.8, alpha=0.4)
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Loss")
-    ax.set_title("Training Loss")
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[0, 1]
-    ax.plot(metrics["steps"], metrics["loss"], linewidth=0.8, alpha=0.4)
-    ax.set_yscale("log")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Loss (log)")
-    ax.set_title("Training Loss Log Scale")
-    ax.grid(True, alpha=0.3)
+    for ax, yscale, title, ylabel in [
+        (axes[0, 0], "linear", "Training Loss", "Loss"),
+        (axes[0, 1], "log",    "Training Loss Log Scale", "Loss (log)"),
+    ]:
+        ax.plot(steps, loss, linewidth=0.8, alpha=0.3, label="train raw")
+        ax.plot(steps, smoothed, linewidth=2, label="train smoothed")
+        if val_steps:
+            ax.plot(val_steps, val_loss, linewidth=2, marker="o", markersize=4, label="val")
+        if yscale == "log":
+            ax.set_yscale("log")
+        ax.set_xlabel("Step")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
 
     ax = axes[1, 0]
     ax.plot(metrics["steps"], metrics["lr"], linewidth=1.5)
