@@ -313,32 +313,39 @@ def plot_loss_curve(metrics: dict, path: str) -> None:
         if not steps:
             return
 
+        import numpy as np
+
         window = max(1, len(loss) // 50)
 
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(steps, loss, linewidth=0.8, alpha=0.4, label="train raw")
+        smoothed = [
+            sum(loss[max(0, i - window): i + 1])
+            / len(loss[max(0, i - window): i + 1])
+            for i in range(len(loss))
+        ]
 
-        if len(loss) > window:
-            smoothed = [
-                sum(loss[max(0, i - window) : i + 1])
-                / len(loss[max(0, i - window) : i + 1])
-                for i in range(len(loss))
-            ]
-            ax.plot(steps, smoothed, linewidth=2, label="train smoothed")
+        pos = [v for v in loss if v > 0]
+        ymax = float(np.percentile(pos, 98)) * 1.15 if pos else None
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(steps, loss, color="steelblue", linewidth=0.6, alpha=0.25, label="train raw")
+        ax.plot(steps, smoothed, color="steelblue", linewidth=2.0, label="train smoothed")
 
         if metrics.get("val_steps"):
             ax.plot(
                 metrics["val_steps"],
                 metrics["val_loss"],
-                linewidth=2,
+                color="tomato",
+                linewidth=2.0,
                 marker="o",
-                markersize=4,
+                markersize=5,
                 label="val",
             )
 
+        if ymax is not None:
+            ax.set_ylim(bottom=0, top=ymax)
         ax.set_xlabel("Step")
         ax.set_ylabel("Loss")
-        ax.set_title(f"Training Loss step {steps[-1]}")
+        ax.set_title(f"Training Loss — step {steps[-1]}")
         ax.legend()
         ax.grid(True, alpha=0.3)
 
@@ -372,25 +379,45 @@ def plot_metrics(metrics: dict, output_dir: str) -> None:
         if not metrics["steps"]:
             return
 
+        import numpy as np
+
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle("Training Metrics", fontsize=16, fontweight="bold")
 
-        window = max(1, len(metrics["loss"]) // 50)
+        loss_arr = metrics["loss"]
+        steps_arr = metrics["steps"]
+        window = max(1, len(loss_arr) // 50)
 
-        ax = axes[0, 0]
-        ax.plot(metrics["steps"], metrics["loss"], linewidth=0.8, alpha=0.4)
-        ax.set_xlabel("Step")
-        ax.set_ylabel("Loss")
-        ax.set_title("Training Loss")
-        ax.grid(True, alpha=0.3)
+        smoothed = [
+            sum(loss_arr[max(0, i - window): i + 1])
+            / len(loss_arr[max(0, i - window): i + 1])
+            for i in range(len(loss_arr))
+        ]
 
-        ax = axes[0, 1]
-        ax.plot(metrics["steps"], metrics["loss"], linewidth=0.8, alpha=0.4)
-        ax.set_yscale("log")
-        ax.set_xlabel("Step")
-        ax.set_ylabel("Loss log")
-        ax.set_title("Training Loss Log Scale")
-        ax.grid(True, alpha=0.3)
+        # Cap linear y-axis at 98th percentile so early spikes don't hide the trend
+        pos = [v for v in loss_arr if v > 0]
+        ymax = float(np.percentile(pos, 98)) * 1.15 if pos else None
+
+        for ax, yscale, title, ylabel in [
+            (axes[0, 0], "linear", "Training Loss", "Loss"),
+            (axes[0, 1], "log",    "Training Loss (log scale)", "Loss (log)"),
+        ]:
+            ax.plot(steps_arr, loss_arr, color="steelblue", linewidth=0.6, alpha=0.25, label="train raw")
+            ax.plot(steps_arr, smoothed, color="steelblue", linewidth=2.0, label="train smoothed")
+            if metrics.get("val_steps"):
+                ax.plot(
+                    metrics["val_steps"], metrics["val_loss"],
+                    color="tomato", linewidth=2.0, marker="o", markersize=5, label="val",
+                )
+            if yscale == "log":
+                ax.set_yscale("log")
+            elif ymax is not None:
+                ax.set_ylim(bottom=0, top=ymax)
+            ax.set_xlabel("Step")
+            ax.set_ylabel(ylabel)
+            ax.set_title(title)
+            ax.legend()
+            ax.grid(True, alpha=0.3)
 
         ax = axes[1, 0]
         ax.plot(metrics["steps"], metrics["lr"], linewidth=1.5)

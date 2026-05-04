@@ -8,7 +8,7 @@ paths:
   base_dir:   /home/bsandoiu/math-llm-infrastructure
   hf_cache:   /home/bsandoiu/.cache/huggingface
   data_dir:   /home/bsandoiu/math-llm-infrastructure/data/processed/openmathinstruct2/shards
-  output_dir: /home/bsandoiu/math-llm-infrastructure/outputs/qlora_8b
+  output_dir: /home/bsandoiu/math-llm-infrastructure/outputs/lora_8b
 
 model:
   tokenizer:        meta-llama/Meta-Llama-3.1-8B-Instruct
@@ -19,25 +19,20 @@ training:
   batch_size:       1
   grad_accum_steps: 32
   lr:               0.0002
-  steps:            0          # ignored when epochs > 0
-  epochs:           1
+  steps:            408000     # same steps as 1B run (stopped at step_408000) — controls for data exposure
+  epochs:           0
   num_workers:      2
 
 precision:
   fp16: false
-  bf16: true
+  bf16: true                   # plain LoRA — 8B fits in bf16 on 2x RTX 3090 (~20GB/GPU)
 
 lora:
   use_lora:  true
-  use_qlora: true
-  rank:      16
-  alpha:     32
-  dropout:   0.05
-
-qlora:
-  quant_type:    nf4
-  compute_dtype: bfloat16
-  double_quant:  true
+  use_qlora: false
+  rank:      64                # 167.8M trainable params; ~10× tokens/params at 1.67B tokens
+  alpha:     128               # 2× rank
+  dropout:   0.05              # LoRA dropout is the sole MC Dropout stochasticity source
 
 logging:
   warmup_steps: 3000
@@ -47,8 +42,7 @@ logging:
   seed:         42
 
 uncertainty:
-  mc_dropout_rate: 0.1   # dropout rate for the MC-dropout hook (after final LayerNorm)
-                          # must be re-applied at inference with model.train() to keep it active
+  mc_dropout_rate: 0.0         # no hook on frozen base weights; rely on lora dropout only
 
 validation:
   # total=13646  train=10918 (80%)  val=1364 (10%)  test=1364 (10%)
