@@ -9,7 +9,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import math
 from src.uq.metrics import answer_entropy, answers_are_equal, token_probability_confidence
-from src.data.format_openmathinstruct2 import FormatConfig, format_openmathinstruct2_exmaple
+from src.data.format_openmathinstruct2 import FormatConfig, format_openmathinstruct2_example
 
 
 @dataclass
@@ -93,7 +93,7 @@ class MCDropoutEvaluator:
         _fmt = FormatConfig(include_final_answer=False, instruct_format=True)
         results = []
         for item in problems:
-            prompt = format_openmathinstruct2_exmaple({"problem": item["problem"]}, _fmt)["prompt_text"]
+            prompt = format_openmathinstruct2_example({"problem": item["problem"]}, _fmt)["prompt_text"]
             # add_special_tokens=False: prompt string already contains <|begin_of_text|>
             input_ids = self.tokenizer(prompt, return_tensors="pt", add_special_tokens=False).input_ids.to(self.cfg.device)
 
