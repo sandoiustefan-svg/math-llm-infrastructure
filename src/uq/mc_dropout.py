@@ -63,6 +63,7 @@ class MCDropoutEvaluator:
     def _generate_once(self, input_ids: torch.Tensor) -> str:
         output_ids = self.model.generate(
             input_ids,
+            attention_mask=torch.ones_like(input_ids),
             max_new_tokens=self.cfg.max_new_tokens,
             do_sample=False,
             pad_token_id=self.tokenizer.pad_token_id,
