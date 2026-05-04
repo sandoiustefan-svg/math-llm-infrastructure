@@ -85,7 +85,8 @@ def load_or_build(source: str, out_path: Path, limit: int) -> list[dict]:
     if out_path.exists():
         print(f"Using cached test set: {out_path}")
         with open(out_path) as f:
-            return [json.loads(l) for l in f if l.strip()]
+            records = [json.loads(l) for l in f if l.strip()]
+        return records[:limit] if limit else records
 
     if source == "openmath_tail":
         return build_openmath_tail(out_path, limit=limit or 500)

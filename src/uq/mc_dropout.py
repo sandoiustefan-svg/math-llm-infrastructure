@@ -79,7 +79,8 @@ class MCDropoutEvaluator:
         idx = text.find(marker)
         if idx == -1:
             return text.strip()
-        return text[idx + len(marker):].strip().splitlines()[0].strip()
+        lines = text[idx + len(marker):].strip().splitlines()
+        return lines[0].strip() if lines else ""
 
     def evaluate(self, problems: list[dict]) -> list[dict]:
         """
