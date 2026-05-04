@@ -1,6 +1,6 @@
 # math-llm-infrastructure
 
-LLaMA-style training infrastructure for large-scale mathematical instruction datasets (OpenMathInstruct-2). Covers preprocessing, token packing, scratch training, fine-tuning pretrained models, and uncertainty quantification (MC Dropout + Deep Ensembles).
+LLaMA LoRA fine-tuning infrastructure for OpenMathInstruct-2, with Uncertainty Quantification (MC Dropout) evaluated via zero-shot and chain-of-thought prompting.
 
 ---
 
@@ -12,305 +12,233 @@ bash scripts/bash/setup_env.sh
 
 ---
 
-## Inspecting the Dataset
+## Preprocessing Pipeline
+
+Converts raw OpenMathInstruct-2 examples into packed `.npy` shards for training.
+
+### Pipeline overview
+
+```
+HuggingFace (nvidia/OpenMathInstruct-2)
+    │
+    ▼  inspect_data.py
+raw.jsonl          {problem, generated_solution, expected_answer, problem_source}
+    │
+    ▼  format_data.py          (Strategy 3 — chat messages + loss mask boundary)
+formatted.jsonl    {messages, prompt_messages, completion_text}
+    │
+    ▼  tokenize_data.py        (apply_chat_template, dual-pass loss masking)
+tokens.jsonl       {input_ids, attention_mask, loss_mask}
+    │
+    ▼  pack_data.py            (fixed-length rows, shard files)
+shards/
+  input_ids_XXXXX.npy        (S, seq_len)  int32
+  attention_mask_XXXXX.npy   (S, seq_len)  int8
+  loss_mask_XXXXX.npy        (S, seq_len)  int8
+  manifest.json
+```
+
+**Strategy 3 formatting** — each example becomes three chat messages:
+
+| Role | Content |
+|---|---|
+| `system` | "You are a careful mathematical reasoning assistant. Solve the problem step by step." |
+| `user` | Problem text |
+| `assistant` | Solution + `\n\nFinal Answer: {answer}` |
+
+Loss is applied **only to completion tokens** (assistant response + EOS). Prompt tokens are masked out.
+
+**Tokenization** — two passes per example:
+1. Full sequence → `input_ids`
+2. Prompt only → defines the `loss_mask` boundary (0 = prompt, 1 = completion)
+
+**Packing** — variable-length examples are chunked into fixed `(seq_len,)` rows. Short examples are padded; long examples are hard-chunked (no truncation, no dropped tokens). Each shard holds `shard_num_seqs` rows.
+
+### Run preprocessing
+
+```bash
+# Debug (5k examples, fast)
+bash scripts/bash/preprocess.sh --debug
+
+# Full dataset
+bash scripts/bash/preprocess.sh
+
+# Full dataset — intermediates in /tmp, only shards saved
+bash scripts/bash/preprocess.sh --shards-only
+```
+
+Each step is idempotent — safe to re-run after a failure.
+
+### Inspect the dataset
 
 ```bash
 python scripts/python/inspect_data.py --limit 3
 ```
 
-| Argument | Description |
-|---|---|
-| `--split` | Dataset split to load (default: `train`) |
-| `--limit` | Number of examples to display |
-| `--skip` | Number of examples to skip before reading |
-
 ---
 
-## Preprocessing Pipeline
+## Training
 
-Converts raw OpenMathInstruct-2 examples into packed training shards saved as `.npy` files.
+### Models
 
-**Strategy 3 formatting:**
-- **Prompt:** `Problem`
-- **Completion:** `Solution + Final Answer`
-- Loss applied **only to completion tokens** (prompt tokens masked out)
+| Model | Base | LoRA rank | Alpha | Trainable params | Steps | Precision |
+|---|---|---|---|---|---|---|
+| 1B | Llama-3.2-1B-Instruct | 16 | 32 | ~21 M | 408 000 | bf16 |
+| 8B | Llama-3.1-8B-Instruct | 64 | 128 | ~168 M | 408 000 | bf16 |
 
-### Steps
+Both use plain LoRA (no quantisation). The 8B model fits on 2× RTX 3090 (~20 GB/GPU) at bf16 with gradient checkpointing.
 
-1. Stream dataset from HuggingFace
-2. Format each example into `prompt_text` + `completion_text`
-3. Tokenize separately, apply loss mask (`0` = prompt, `1` = completion)
-4. Pack into fixed-length sequences
-5. Save `.npy` shards + `manifest.json`
+LoRA adapts 7 modules per layer: `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`. Dropout `p=0.05` is set on all adapter layers — this is the sole stochasticity source for MC Dropout at inference.
 
-### Run Preprocessing
+### Data split
 
-```bash
-# Debug (5k examples, fast)
-python scripts/python/preprocess_data.py \
-  --tokenizer mistralai/Mistral-7B-v0.1 \
-  --seq-len 1024 \
-  --limit 5000 \
-  --out-dir data/processed/openmathinstruct2_debug \
-  --shard-num-seqs 256
-
-# Full dataset
-python scripts/python/preprocess_data.py \
-  --tokenizer mistralai/Mistral-7B-v0.1 \
-  --seq-len 2048 \
-  --out-dir data/processed/openmathinstruct2
+```
+total shards T  (13 646 for full OpenMathInstruct-2)
+  train  = [0,        T − val − test)   ≈ 80 %   (10 918 shards)
+  val    = [T−val−test,  T − test)       ≈ 10 %   ( 1 364 shards)
+  test   = [T − test,    T)              ≈ 10 %   ( 1 364 shards)  — held out
 ```
 
-| Argument | Description |
-|---|---|
-| `--tokenizer` | HuggingFace tokenizer name or local path |
-| `--seq-len` | Tokens per packed sequence (default: `2048`) |
-| `--shard-num-seqs` | Sequences per `.npy` shard (default: `1024`) |
-| `--no-loss-mask` | Train on all tokens (no prompt masking) |
-| `--limit` | Max examples to preprocess (`0` = no limit) |
-| `--skip` | Examples to skip before processing |
-| `--split` | Dataset split (default: `train`) |
+The split is written to `<output_dir>/splits.json` at training start.
 
----
-
-## Training From Scratch
-
-Builds a LLaMA model from scratch and trains it on the preprocessed shards.
-
-### Local (debug)
+### Launch
 
 ```bash
-python scripts/python/train.py \
-  --data-dir data/processed/openmathinstruct2_debug \
-  --tokenizer mistralai/Mistral-7B-v0.1 \
-  --n-layers 8 \
-  --hidden-size 512 \
-  --n-heads 8 \
-  --batch-size 4 \
-  --steps 500 \
-  --output-dir outputs/debug_run
+# 1B model
+bash scripts/bash/train.sh configs/llama3_1b_lora.yaml 42
+
+# 8B model
+bash scripts/bash/train.sh configs/llama3_8b_lora.yaml 42
 ```
 
-### Multi-GPU (DDP)
+`train.sh` reads the nested YAML, writes a flat runtime config to `/tmp/train_config_seed42.yaml`, sets `CUDA_VISIBLE_DEVICES` and NCCL env vars, then launches:
 
-```bash
-torchrun --nproc_per_node=2 scripts/python/train.py \
-  --data-dir data/processed/openmathinstruct2 \
-  --tokenizer mistralai/Mistral-7B-v0.1 \
-  --n-layers 16 \
-  --hidden-size 1536 \
-  --n-heads 12 \
-  --batch-size 4 \
-  --steps 1200000 \
-  --fp16 \
-  --resume \
-  --output-dir outputs/scratch_16L
+```
+torchrun --nproc_per_node=2 scripts/python/train.py --config <runtime_config>
 ```
 
-### Habrok (SLURM)
+Checkpoints are saved every 2 000 steps to `<output_dir>/checkpoints/step_XXXXX/`. Only the two most recent step checkpoints are kept. The `best/` checkpoint tracks the lowest validation loss.
 
-```bash
-sbatch scripts/bash/habrok_train.sh
+To resume:
+```yaml
+# in the cluster config yaml:
+logging:
+  resume: true
 ```
 
-The job self-resubmits before training starts so it survives the 4-hour wall time limit. Checkpoints are saved every 2000 steps; only the last 2 are kept.
+### Cluster configs
 
-### Model size presets
-
-| Preset | Layers | Hidden | ~Params |
-|---|---|---|---|
-| debug | 8 | 512 | ~30M |
-| small | 12 | 768 | ~125M |
-| medium | 16 | 1536 | ~500M |
-| large | 24 | 2048 | ~2B |
-
-### Training arguments
-
-| Argument | Description |
-|---|---|
-| `--data-dir` | Path to preprocessed shards (use with disk mode) |
-| `--online` | Stream from HuggingFace directly, no preprocessing step |
-| `--tokenizer` | HuggingFace tokenizer ID or local path |
-| `--pretrained-model` | HF model ID or checkpoint path — **skips scratch init, enables fine-tuning** |
-| `--n-layers` | Number of transformer layers |
-| `--hidden-size` | Hidden dimension |
-| `--n-heads` | Number of attention heads |
-| `--batch-size` | Per-GPU batch size |
-| `--lr` | Learning rate (default: `3e-4`) |
-| `--steps` | Total training steps |
-| `--fp16` | Enable mixed precision (bfloat16) |
-| `--seed` | Random seed — controls weight init and shard shuffling (default: `42`) |
-| `--save-every` | Save checkpoint every N steps (default: `500`) |
-| `--log-every` | Print log line every N steps (default: `50`) |
-| `--resume` | Resume from the latest checkpoint in `--output-dir` |
-| `--output-dir` | Where to write checkpoints, metrics, and plots |
-
----
-
-## Fine-tuning a Pretrained Model
-
-Use `--pretrained-model` to start from an existing HuggingFace model instead of training from scratch. The model architecture, vocab size, and sequence length are taken from the pretrained model's config — `--n-layers`, `--hidden-size`, `--n-heads` are ignored.
-
-### Local (quick test)
-
-```bash
-python scripts/python/train.py \
-  --pretrained-model mistralai/Mistral-7B-v0.1 \
-  --tokenizer mistralai/Mistral-7B-v0.1 \
-  --data-dir data/processed/openmathinstruct2_debug \
-  --batch-size 1 \
-  --lr 1e-5 \
-  --steps 100 \
-  --output-dir outputs/finetune_test
-```
-
-### Multi-GPU (DDP)
-
-```bash
-torchrun --nproc_per_node=2 scripts/python/train.py \
-  --pretrained-model mistralai/Mistral-7B-v0.1 \
-  --tokenizer mistralai/Mistral-7B-v0.1 \
-  --data-dir data/processed/openmathinstruct2 \
-  --batch-size 2 \
-  --lr 1e-5 \
-  --steps 50000 \
-  --fp16 \
-  --resume \
-  --output-dir outputs/finetune_seed42
-```
-
-### Habrok (SLURM)
-
-```bash
-# Single run
-sbatch scripts/bash/finetune_habrok.sh
-
-# Three independent seeds for Deep Ensemble
-sbatch --export=SEED=42,OUTDIR=finetune_seed42 scripts/bash/finetune_habrok.sh
-sbatch --export=SEED=43,OUTDIR=finetune_seed43 scripts/bash/finetune_habrok.sh
-sbatch --export=SEED=44,OUTDIR=finetune_seed44 scripts/bash/finetune_habrok.sh
-```
-
-Each seed produces a different checkpoint. The three checkpoints are used together as a Deep Ensemble for uncertainty quantification.
-
-### Fine-tuning a fine-tuned checkpoint (iterative)
-
-You can pass any previously saved checkpoint as `--pretrained-model` — all checkpoints are saved in HuggingFace format via `model.save_pretrained()`:
-
-```bash
-python scripts/python/train.py \
-  --pretrained-model outputs/finetune_seed42/checkpoints/final \
-  --tokenizer mistralai/Mistral-7B-v0.1 \
-  --data-dir data/processed/openmathinstruct2 \
-  --lr 5e-6 \
-  --steps 20000 \
-  --output-dir outputs/finetune_seed42_v2
-```
-
----
-
-## Experiment Registry
-
-Every training run (scratch or fine-tune) is automatically registered in `experiments/registry.json`. Use the CLI to inspect runs:
-
-```bash
-# List all runs
-python scripts/python/experiment.py list
-
-# Full detail for one run (config, metrics, checkpoint path)
-python scripts/python/experiment.py show exp_001
-
-# Add a note to a run
-python scripts/python/experiment.py note exp_001 "used in Table 2"
-
-# Manually register a run that predates auto-registration
-python scripts/python/experiment.py register --type finetune --name "mistral-baseline"
-```
+| File | Model | Output dir |
+|---|---|---|
+| `configs/clusters/macross.yaml` | 1B | `outputs/lora_1b_seed42` |
+| `configs/clusters/macross_8b.yaml` | 8B | `outputs/lora_8b_seed42` |
 
 ---
 
 ## Uncertainty Quantification
 
-UQ answers: **when the model gives an answer, how much should we trust it?**
+### Method — MC Dropout
 
-Two methods are supported. Both compute the same output metrics, computed over the **full generated text** (reasoning chain + final answer):
+LoRA dropout (`p=0.05`) is active on all 112 adapter layers during both training and inference. At inference time, `model.train()` keeps dropout active; running the same problem through the model **N=20 times** yields a distribution over answers.
+
+No additional dropout hook is needed — the LoRA adapter dropout is the stochasticity source.
+
+```python
+# Inference recipe (handled automatically by run_uq_eval.py)
+model = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype=torch.bfloat16)
+model = PeftModel.from_pretrained(model, checkpoint_path, is_trainable=False)
+model.train()   # activates LoRA dropout
+
+answers = [model.generate(input_ids, ...) for _ in range(20)]
+```
+
+### UQ metrics
 
 | Metric | Meaning |
 |---|---|
-| `confidence` | Fraction of passes/members agreeing with the majority answer |
-| `entropy` | Spread of the answer distribution (0 = unanimous, log₂K = max disagreement) |
-| `token_mean_confidence` | Geometric mean token probability across the full generation |
-| `token_perplexity` | Inverse of token confidence — lower = more certain word-by-word |
-| `token_min_prob` | Probability of the least-certain token (weakest link in the chain) |
+| `confidence` | Fraction of passes agreeing with the majority answer |
+| `entropy` | Spread of answer distribution (0 = unanimous) |
+| `token_mean_confidence` | Geometric mean token probability across the generation |
+| `token_perplexity` | Inverse of token confidence |
+| `token_min_prob` | Probability of the least-certain token |
 | `ece` | Expected Calibration Error — does confidence=0.8 mean 80% accuracy? |
 
-### Method 1 — MC Dropout (single model)
-
-Keeps dropout active at inference and runs the same problem through the model N times. Each pass produces a slightly different generation due to stochastic dropout masks. Measures disagreement across passes.
-
-**Requires:** a model trained with dropout (the scratch-trained model has `attention_dropout=0.1`).
+### Evaluation scripts
 
 ```bash
-python scripts/python/evaluate_uq.py \
-  --method mc_dropout \
-  --model-path outputs/scratch_16L/checkpoints/final \
-  --tokenizer mistralai/Mistral-7B-v0.1 \
-  --problems-file data/problems.jsonl \
-  --output-dir outputs/uq_mc_dropout \
-  --num-passes 20
+# 1B model — MC Dropout
+bash run_eval_1b.sh [method] [test_source] [checkpoint_step] [limit]
+
+# 8B model — MC Dropout
+bash run_eval_8b.sh [method] [test_source] [checkpoint_step] [limit]
 ```
 
-### Method 2 — Deep Ensemble (multiple models)
+| Argument | Options | Default |
+|---|---|---|
+| `method` | `mc_dropout`, `ensemble` | `mc_dropout` |
+| `test_source` | `all`, `gsm8k`, `math`, `openmath_tail` | `all` |
+| `checkpoint_step` | step number or empty (→ `final`) | final |
+| `limit` | max problems per benchmark | 500 |
 
-Runs K independently fine-tuned models (different seeds) on the same problem. Measures disagreement across models. More expensive but a stronger uncertainty signal.
+Examples:
+```bash
+bash run_eval_1b.sh mc_dropout gsm8k 408000 500
+bash run_eval_1b.sh mc_dropout all 408000 50    # quick check
+bash run_eval_8b.sh mc_dropout all              # final checkpoint
+```
 
-**Requires:** K checkpoints trained with different `--seed` values.
+---
+
+## Experiment Design — 2×2
+
+The main experimental comparison is a **2×2 factorial design** across model size and prompt style:
+
+|  | Zero-shot | Few-shot CoT |
+|---|---|---|
+| **1B LoRA rank 16** | zero-shot accuracy + UQ | CoT accuracy + UQ |
+| **8B LoRA rank 64** | zero-shot accuracy + UQ | CoT accuracy + UQ |
+
+**Zero-shot**: the model is given only the problem and asked to solve it directly.
+
+**Few-shot CoT (chain-of-thought)**: the prompt includes 3–5 worked examples that demonstrate step-by-step reasoning before the target problem. The model is expected to follow the same pattern. This is *true* CoT — demonstrated reasoning chains, not just "think step by step".
+
+**Research question**: does chain-of-thought prompting improve the *correlation between model confidence and correctness* (calibration), and does this hold across model sizes?
+
+Key metrics per cell: accuracy, ECE, confidence–correctness correlation (AUROC), and coverage at confidence thresholds 0.8 / 0.9.
+
+---
+
+## Experiment Registry
+
+Every training run is automatically registered in `experiments/registry.json`.
 
 ```bash
-python scripts/python/evaluate_uq.py \
-  --method ensemble \
-  --model-paths \
-      outputs/finetune_seed42/checkpoints/final \
-      outputs/finetune_seed43/checkpoints/final \
-      outputs/finetune_seed44/checkpoints/final \
-  --tokenizer mistralai/Mistral-7B-v0.1 \
-  --problems-file data/problems.jsonl \
-  --output-dir outputs/uq_ensemble
+python scripts/python/experiment.py list
+python scripts/python/experiment.py show exp_001
+python scripts/python/experiment.py note exp_001 "used in Table 2"
 ```
 
-### On Habrok
+---
 
-```bash
-# MC Dropout
-sbatch --export=METHOD=mc_dropout,\
-MODEL_PATH=/scratch/s5549329/outputs/scratch/checkpoints/final,\
-PROBLEMS_FILE=/scratch/s5549329/data/problems.jsonl,\
-OUTPUT_DIR=/scratch/s5549329/outputs/uq_mc_dropout \
-scripts/bash/evaluate_habrok.sh
+## Output Structure
 
-# Deep Ensemble
-sbatch --export=METHOD=ensemble,\
-"MODEL_PATHS=/scratch/s5549329/outputs/finetune_seed42/checkpoints/final /scratch/s5549329/outputs/finetune_seed43/checkpoints/final",\
-PROBLEMS_FILE=/scratch/s5549329/data/problems.jsonl,\
-OUTPUT_DIR=/scratch/s5549329/outputs/uq_ensemble \
-scripts/bash/evaluate_habrok.sh
 ```
+outputs/lora_8b_seed42/
+  checkpoints/
+    step_2000/
+      adapter_config.json
+      adapter_model.safetensors
+      training_state.pt          ← optimizer state, step, metrics
+    best/                        ← lowest val-loss adapter
+    final/                       ← end-of-training adapter
+  splits.json                    ← train/val/test shard indices
+  metrics.json                   ← loss, lr, tokens/sec per step
+  training_metrics.png           ← 2×2 plot (loss, log loss, LR, throughput)
+  loss_curve.png                 ← live loss curve updated every log_every steps
 
-### Problems file format
-
-Each line is a JSON object:
-
-```jsonl
-{"problem": "What is 2 + 2?", "expected_answer": "4"}
-{"problem": "Solve x² - 5x + 6 = 0.", "expected_answer": "2, 3"}
+results/
+  uq_eval_1b_mc_dropout_gsm8k_YYYYMMDD_HHMMSS/
+    results.json                 ← per-problem answers, confidence, correctness
+    summary.json                 ← accuracy, ECE, coverage
+    reliability_diagram.png      ← calibration plot
 ```
-
-`expected_answer` is optional — omit it for unlabeled problems (correctness metrics will be skipped, UQ metrics still computed).
-
-### Output files
-
-| File | Contents |
-|---|---|
-| `results.json` | Per-problem: answers, confidence, entropy, token metrics, correctness |
-| `summary.json` | Aggregate: accuracy, mean confidence, ECE, coverage at 0.8/0.9 |
-| `reliability_diagram.png` | Calibration plot — perfect model lies on the diagonal |
