@@ -48,7 +48,7 @@ def _load_cluster_cfg(cluster: str) -> dict:
 
 def _resolve_paths(cluster_cfg: dict, seed: int) -> dict:
     paths = cluster_cfg["paths"]
-    gpus  = cluster_cfg["gpus"]
+    gpus  = cluster_cfg["hardware"]
     return {
         "base_dir":         paths["base_dir"],
         "data_dir":         paths["data_dir"],
