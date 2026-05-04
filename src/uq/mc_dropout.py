@@ -90,11 +90,16 @@ class MCDropoutEvaluator:
         Returns:
             list of dicts, one per problem.
         """
-        _fmt = FormatConfig(include_final_answer=False, instruct_format=True)
+        _fmt = FormatConfig(include_final_answer=False)
         results = []
         for item in problems:
-            prompt = format_openmathinstruct2_example({"problem": item["problem"]}, _fmt)["prompt_text"]
-            # add_special_tokens=False: prompt string already contains <|begin_of_text|>
+            formatted = format_openmathinstruct2_example({"problem": item["problem"]}, _fmt)
+            prompt = self.tokenizer.apply_chat_template(
+                formatted["prompt_messages"],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            # add_special_tokens=False: apply_chat_template already includes <|begin_of_text|>
             input_ids = self.tokenizer(prompt, return_tensors="pt", add_special_tokens=False).input_ids.to(self.cfg.device)
 
             answers = []

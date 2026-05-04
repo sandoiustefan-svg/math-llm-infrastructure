@@ -167,7 +167,7 @@ def token_probability_confidence(
        "therefore") which the model assigns near-certainty probability regardless
        of whether the math is correct.
 
-    2. answer_span — geometric mean over ONLY the tokens after "### Final Answer:".
+    2. answer_span — geometric mean over ONLY the tokens after "Final Answer:".
        Removes reasoning chain noise. Should correlate better with correctness.
 
     3. numeric_only — geometric mean over ONLY tokens that contain at least one digit.
@@ -179,8 +179,8 @@ def token_probability_confidence(
        the whole answer as uncertain, regardless of how confident the rest is.
 
     Args:
-        prompt: the full prompt string (up to and including "### Solution:\\n")
-        answer: the FULL generated text (reasoning chain + "### Final Answer: ...")
+        prompt: the full prompt string from apply_chat_template (up to assistant header)
+        answer: the FULL generated text (reasoning chain + "Final Answer: ...")
         device: torch device string
 
     Returns dict with keys:
@@ -218,7 +218,7 @@ def token_probability_confidence(
     # --- 1. Full sequence ---
     full_metrics = _compute_confidence_from_probs(token_probs)
 
-    # --- 2. Answer span only (tokens after "### Final Answer:") ---
+    # --- 2. Answer span only (tokens after "Final Answer:") ---
     marker_ids   = tokenizer(_ANSWER_MARKER, add_special_tokens=False).input_ids
     marker_len   = len(marker_ids)
     span_start   = None
@@ -242,7 +242,7 @@ def token_probability_confidence(
     ]
     numeric_metrics = _compute_confidence_from_probs(numeric_probs)
 
-    # --- 4. Numeric tokens — answer span only (digits after ### Final Answer:) ---
+    # --- 4. Numeric tokens — answer span only (digits after "Final Answer:") ---
     if span_start is not None and span_start < len(token_probs):
         span_token_ids = token_ids_list[span_start:]
         span_token_probs_list = token_probs[span_start:]
