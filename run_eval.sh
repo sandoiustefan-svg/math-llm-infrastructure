@@ -1,16 +1,18 @@
 #!/bin/bash
-# Usage: bash run_eval.sh [cluster] [seed] [method] [test_source] [checkpoint_step]
+# Usage: bash run_eval.sh [cluster] [seed] [method] [test_source] [checkpoint_step] [limit]
 #   cluster          : macross (default) | a100-1 | a100-2 | a100-3
 #   seed             : training seed used to locate the checkpoint (default: 42)
 #   method           : mc_dropout (default) | ensemble
 #   test_source      : all (default) | gsm8k | math | openmath_tail
 #   checkpoint_step  : step number to eval (default: final); e.g. 408000
+#   limit            : max problems per test set (default: 500; use 50 for a quick check)
 #
 # Examples:
-#   bash run_eval.sh                              # MC Dropout, seed 42, all test sets, final ckpt
+#   bash run_eval.sh                                    # MC Dropout, seed 42, all test sets, final ckpt
 #   bash run_eval.sh macross 42 mc_dropout gsm8k
 #   bash run_eval.sh macross 42 mc_dropout all 408000   # eval mid-training checkpoint
-#   bash run_eval.sh macross 42 ensemble all      # needs seed-42/123/456 checkpoints on disk
+#   bash run_eval.sh macross 42 mc_dropout gsm8k 408000 50  # quick 50-problem smoke test
+#   bash run_eval.sh macross 42 ensemble all            # needs seed-42/123/456 checkpoints on disk
 set -euo pipefail
 
 CLUSTER=${1:-macross}
@@ -18,6 +20,7 @@ SEED=${2:-42}
 METHOD=${3:-mc_dropout}
 TEST_SOURCE=${4:-all}
 CHECKPOINT_STEP=${5:-}
+LIMIT=${6:-500}
 CONFIG="configs/clusters/${CLUSTER}.yaml"
 
 if [ ! -f "$CONFIG" ]; then
@@ -62,6 +65,6 @@ python3 scripts/python/run_uq_eval.py \
     --num-passes 20 \
     --mc-dropout-rate 0.1 \
     --max-new-tokens 512 \
-    --limit 500 \
+    --limit "$LIMIT" \
     $CKPT_STEP_ARG \
     2>&1 | tee "logs/uq_eval_${METHOD}_seed${SEED}_${TEST_SOURCE}_$(date +%Y%m%d_%H%M%S).log"
