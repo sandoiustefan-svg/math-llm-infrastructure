@@ -50,6 +50,11 @@ class MCDropoutEvaluator:
             self.model = base
         self.model.to(cfg.device)
 
+        # Remove temperature/top_p from generation_config — irrelevant with do_sample=False
+        # but transformers warns about them on every generate() call otherwise.
+        self.model.generation_config.temperature = None
+        self.model.generation_config.top_p = None
+
         if cfg.mc_dropout_rate > 0:
             from src.training.trainer import _add_mc_dropout_hook
             _add_mc_dropout_hook(self.model, cfg.mc_dropout_rate)

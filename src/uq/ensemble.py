@@ -47,6 +47,8 @@ class EnsembleEvaluator:
             model = PeftModel.from_pretrained(base, path)
         else:
             model = base
+        model.generation_config.temperature = None
+        model.generation_config.top_p = None
         model.to(self.cfg.device)
         model.eval()
         return model
