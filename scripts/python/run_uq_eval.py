@@ -149,7 +149,7 @@ def main():
                     choices=["openmath_tail", "gsm8k", "math", "all"])
     ap.add_argument("--seed", type=int, default=42,
                     help="Training seed — used to locate output_dir_seed{N}/checkpoints/final")
-    ap.add_argument("--base-model", default="meta-llama/Meta-Llama-3.1-8B-Instruct",
+    ap.add_argument("--base-model", default="meta-llama/Llama-3.2-1B-Instruct",
                     help="HF id of the base model (adapter is loaded on top of this)")
     ap.add_argument("--num-passes", type=int, default=20,
                     help="[mc_dropout] Number of stochastic forward passes per problem")
@@ -160,6 +160,8 @@ def main():
                     help="Max problems per test set (0 = all; for openmath_tail default 500 applies)")
     ap.add_argument("--ensemble-seeds", nargs="+", type=int, default=[42, 123, 456],
                     help="[ensemble] Training seeds whose checkpoints form the ensemble")
+    ap.add_argument("--checkpoint-step", type=int, default=None,
+                    help="Use step_N checkpoint instead of final (e.g. --checkpoint-step 408000)")
     ap.add_argument("--test-sets-dir", default="",
                     help="Directory for cached test-set JSONLs. Defaults to <data_dir>/../test_sets/")
     args = ap.parse_args()
@@ -180,7 +182,10 @@ def main():
     sources = ["openmath_tail", "gsm8k", "math"] if args.test_source == "all" else [args.test_source]
 
     # --- Checkpoint ---
-    ckpt_path = f"{paths['output_dir']}/checkpoints/final"
+    if args.checkpoint_step is not None:
+        ckpt_path = f"{paths['output_dir']}/checkpoints/step_{args.checkpoint_step}"
+    else:
+        ckpt_path = f"{paths['output_dir']}/checkpoints/final"
     if args.method == "mc_dropout" and not Path(ckpt_path).exists():
         sys.exit(f"Checkpoint not found: {ckpt_path}")
 

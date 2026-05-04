@@ -1,20 +1,23 @@
 #!/bin/bash
-# Usage: bash run_eval.sh [cluster] [seed] [method] [test_source]
-#   cluster     : macross (default) | a100-1 | a100-2 | a100-3
-#   seed        : training seed used to locate the checkpoint (default: 42)
-#   method      : mc_dropout (default) | ensemble
-#   test_source : all (default) | gsm8k | math | openmath_tail
+# Usage: bash run_eval.sh [cluster] [seed] [method] [test_source] [checkpoint_step]
+#   cluster          : macross (default) | a100-1 | a100-2 | a100-3
+#   seed             : training seed used to locate the checkpoint (default: 42)
+#   method           : mc_dropout (default) | ensemble
+#   test_source      : all (default) | gsm8k | math | openmath_tail
+#   checkpoint_step  : step number to eval (default: final); e.g. 408000
 #
 # Examples:
-#   bash run_eval.sh                        # MC Dropout, seed 42, all test sets, macross
+#   bash run_eval.sh                              # MC Dropout, seed 42, all test sets, final ckpt
 #   bash run_eval.sh macross 42 mc_dropout gsm8k
-#   bash run_eval.sh macross 42 ensemble all   # needs seed-42/123/456 checkpoints on disk
+#   bash run_eval.sh macross 42 mc_dropout all 408000   # eval mid-training checkpoint
+#   bash run_eval.sh macross 42 ensemble all      # needs seed-42/123/456 checkpoints on disk
 set -euo pipefail
 
 CLUSTER=${1:-macross}
 SEED=${2:-42}
 METHOD=${3:-mc_dropout}
 TEST_SOURCE=${4:-all}
+CHECKPOINT_STEP=${5:-}
 CONFIG="configs/clusters/${CLUSTER}.yaml"
 
 if [ ! -f "$CONFIG" ]; then
@@ -29,7 +32,7 @@ with open("$CONFIG") as f:
     c = yaml.safe_load(f)
 print(f"BASE_DIR={c['paths']['base_dir']}")
 print(f"HF_CACHE={c['paths']['hf_cache']}")
-print(f"CUDA_DEVICES={c['gpus']['cuda_devices']}")
+print(f"CUDA_DEVICES={c['hardware']['cuda_devices']}")
 EOF
 )"
 
@@ -46,6 +49,11 @@ mkdir -p logs results
 
 export HF_HOME="$HF_CACHE"
 
+CKPT_STEP_ARG=""
+if [ -n "$CHECKPOINT_STEP" ]; then
+    CKPT_STEP_ARG="--checkpoint-step $CHECKPOINT_STEP"
+fi
+
 python3 scripts/python/run_uq_eval.py \
     --cluster "$CLUSTER" \
     --method "$METHOD" \
@@ -55,4 +63,5 @@ python3 scripts/python/run_uq_eval.py \
     --mc-dropout-rate 0.1 \
     --max-new-tokens 512 \
     --limit 500 \
+    $CKPT_STEP_ARG \
     2>&1 | tee "logs/uq_eval_${METHOD}_seed${SEED}_${TEST_SOURCE}_$(date +%Y%m%d_%H%M%S).log"
