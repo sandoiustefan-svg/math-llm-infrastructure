@@ -140,6 +140,7 @@ class MCDropoutEvaluator:
 
             results.append({
                 "problem": item["problem"],
+                "raws": raws,
                 "answers": answers,
                 "majority_answer": majority,
                 "confidence": confidence,

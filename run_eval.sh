@@ -63,7 +63,7 @@ python3 scripts/python/run_uq_eval.py \
     --test-source "$TEST_SOURCE" \
     --seed "$SEED" \
     --num-passes 20 \
-    --mc-dropout-rate 0.1 \
+    --mc-dropout-rate 0.0 \
     --max-new-tokens 512 \
     --limit "$LIMIT" \
     $CKPT_STEP_ARG \
