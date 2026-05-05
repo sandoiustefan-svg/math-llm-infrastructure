@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a LLaMA-style training infrastructure for large-scale mathematical instruction datasets (OpenMathInstruct-2). The pipeline covers preprocessing, token packing, and training LLaMA models from scratch with support for distributed training (DDP).
+Research infrastructure for uncertainty quantification (UQ) on fine-tuned LLMs applied to mathematical reasoning. The pipeline covers: preprocessing OpenMathInstruct-2, LoRA/QLoRA fine-tuning of LLaMA models (1B and 8B), and evaluating epistemic uncertainty via MC Dropout and Deep Ensembles against GSM8K, MATH, and OpenMathInstruct-2 test sets.
 
 ## Common Commands
 
@@ -16,46 +16,43 @@ bash scripts/bash/setup_env.sh
 ### Run Tests
 ```bash
 pytest tests/data/
-# Single test file:
-pytest tests/data/test_tokenize_pack.py
+pytest tests/data/test_pack_shards.py   # single file
 ```
 
 ### Preprocess Data
 ```bash
-python scripts/python/preprocess_data.py \
-  --tokenizer meta-llama/Llama-3.2-1B \
-  --seq-len 1024 \
-  --limit 5000 \
-  --out-dir data/processed/openmathinstruct2_debug
+bash scripts/bash/preprocess.sh          # full dataset
+bash scripts/bash/preprocess.sh --debug  # 30 examples, seq_len=512
 ```
 
-### Train
+### Train (cluster config drives everything)
 ```bash
-python scripts/python/train.py \
-  --data-dir data/processed/openmathinstruct2 \
-  --tokenizer meta-llama/Llama-3.1-8B-Instruct \
-  --n-layers 16 --hidden-size 1536 \
-  --batch-size 4 --steps 10000
+bash scripts/bash/train.sh configs/clusters/macross.yaml 42   # seed=42
+bash scripts/bash/train.sh configs/clusters/macross_8b.yaml 123
 ```
 
-### Distributed Training
+### UQ Evaluation
 ```bash
-torchrun --nproc_per_node=2 scripts/python/train.py \
-  --data-dir data/processed/openmathinstruct2 \
-  --tokenizer meta-llama/Llama-3.2-1B \
-  --batch-size 4 --fp16
+# MC Dropout (single model)
+python scripts/python/run_uq_eval.py \
+    --cluster macross \
+    --method mc_dropout \
+    --test-source all \
+    --seed 42
+
+# Deep Ensemble (multiple seeds)
+python scripts/python/run_uq_eval.py \
+    --cluster macross \
+    --method ensemble \
+    --test-source gsm8k \
+    --ensemble-seeds 42 123 456
 ```
 
-### Full Pipeline (Debug Mode)
+### Utilities
 ```bash
-bash scripts/bash/run_pipeline.sh --debug    # 5k examples, small model, 100 steps
-bash scripts/bash/run_pipeline.sh            # Full run
-bash scripts/bash/run_pipeline.sh --online   # Stream from HF, no preprocessing
-```
-
-### Inspect Dataset
-```bash
+python scripts/python/replot_metrics.py outputs/lora_1b_seed42/metrics.json
 python scripts/python/inspect_data.py --limit 3
+python -m src.uq.test_sets --source all --out-dir data/test_sets --limit 500
 ```
 
 ## Architecture
@@ -63,43 +60,79 @@ python scripts/python/inspect_data.py --limit 3
 ### Data Flow
 ```
 OpenMathInstruct-2 (HuggingFace)
-  → iter_openmathinstruct2()         # streaming generator
-  → format_openmathinstruct2_example() # Strategy 3: Problem → Solution → Final Answer
-  → tokenize_pack_and_save()         # tokenize + pack into fixed-length sequences + save .npy shards
-  → PackedShardDataset / OnlinePackedDataset  # DDP-aware iterable dataset
-  → DataLoader → train()             # masked causal loss (loss only on completion tokens)
+  → preprocess.sh / preprocess_to_shards.py
+      → iter_openmathinstruct2()          # streaming generator
+      → format_openmathinstruct2_example() # Strategy 3: Problem → Solution → Final Answer
+      → tokenize + pack → .npy shards    # input_ids, attention_mask, loss_mask
+  → NpyShardDataset                      # manifest.json + .npy shard loader
+  → DataLoader → trainer.py             # masked causal loss (only completion tokens)
 ```
 
 ### Key Design Decisions
 
-**Strategy 3 formatting**: Each example is formatted as `Problem + Solution + Final Answer`. Loss masking is applied so only completion tokens (solution + answer) contribute to the loss — prompt tokens are masked out.
+**Strategy 3 formatting**: Each example is `Problem + Solution + Final Answer`. Loss masking ensures only completion tokens (solution + answer) contribute — prompts are masked out.
 
-**Token packing**: Multiple tokenized examples are packed into fixed-length sequences to maximize GPU utilization. Shards are saved as `.npy` files (`input_ids_XXXXX.npy` + `loss_mask_XXXXX.npy`) with a `manifest.json` index.
+**LoRA fine-tuning**: Primary training mode. Plain LoRA for 1B (fits in bf16), QLoRA for 8B (4-bit NF4). `lora_dropout=0.1` is set intentionally to enable MC Dropout at inference — the same dropout that regularises training is re-activated (via `model.train()`) during MC Dropout evaluation.
 
-**Two dataset modes**:
-- *Disk-based* (`PackedShardDataset`): Load preprocessed shards; supports checkpointing, shard shuffling, DDP rank splitting.
-- *Online* (`OnlinePackedDataset`): Streams → formats → tokenizes → packs on-the-fly; no preprocessing step needed.
+**MC Dropout inference**: `model.train()` at inference time re-activates the LoRA dropout. An additional `nn.Dropout` hook is inserted after the final RMSNorm via `_add_mc_dropout_hook()`. Each of `num_passes` greedy forward passes produces a different stochastic prediction; answer disagreement estimates epistemic uncertainty.
 
-**Configuration pattern**: All components use frozen dataclasses (`ReadConfig`, `FormatConfig`, `PackConfig`, `LlamaModelConfig`, `TrainConfig`). These are instantiated in the script entry points and passed into library functions.
+**Deep Ensembles**: Multiple LoRA adapters trained from different seeds loaded sequentially (to avoid multiplying VRAM by K). Uncertainty from inter-model disagreement is complementary to MC Dropout.
+
+**UQ metrics**: Six confidence measures are computed per problem — full-sequence, answer-span, numeric-only, numeric-span, position-weighted, and majority-vote fraction — each reported with mean confidence, perplexity, min token prob, and std token prob. ECE and reliability diagrams are produced for all six.
+
+**Cluster config pattern**: `configs/clusters/<cluster>.yaml` holds all hardware and path settings. `train.sh` and `run_uq_eval.py` read the same YAML, keeping paths consistent between training and eval.
+
+**Experiment registry**: `experiments/registry.json` is a lightweight JSON log of all runs. `ExperimentRegistry` is called automatically from `trainer.py` at start and completion of each run.
 
 ### Module Map
 
 | Module | Purpose |
 |---|---|
 | `src/data/read_openmathinstruct2.py` | HF dataset streaming |
-| `src/data/format_openmathinstruct2.py` | Strategy 3 example formatting |
-| `src/data/tokenize_pack.py` | Tokenize, pack, and save shards |
-| `src/data/packed_dataset.py` | Disk-based DDP-aware IterableDataset |
-| `src/data/online_dataset.py` | Streaming IterableDataset |
-| `src/model/llama_model.py` | LLaMA model builder with presets (debug/small/medium/large) |
-| `src/training/trainer.py` | Training loop, `masked_causal_loss`, checkpoint save/resume |
-| `scripts/python/train.py` | Training entry point |
-| `scripts/python/preprocess_data.py` | Preprocessing entry point |
+| `src/data/format_openmathinstruct2.py` | Strategy 3 example formatting; `FormatConfig` |
+| `src/data/tokenizer.py` | Tokenizer loading helpers |
+| `src/data/pack_shards.py` | Tokenize, pack, write `.npy` shards |
+| `src/data/load_shards.py` | `NpyShardDataset` — manifest-based shard loader for training |
+| `src/model/llama_model.py` | From-scratch LLaMA builder with presets (debug/small/medium/large) |
+| `src/training/trainer.py` | `TrainConfig`, `load_train_config()`, training loop, LoRA/QLoRA, MC Dropout hook |
+| `src/uq/mc_dropout.py` | `MCDropoutEvaluator` — stochastic forward passes |
+| `src/uq/ensemble.py` | `EnsembleEvaluator` — sequential per-member inference |
+| `src/uq/metrics.py` | Token confidence measures, ECE, reliability diagrams, `summarise()` |
+| `src/uq/test_sets.py` | Download/cache GSM8K, MATH, OpenMathInstruct-2 tail as JSONL |
+| `src/experiments/registry.py` | `ExperimentRegistry` — JSON-backed experiment log |
+| `scripts/python/run_uq_eval.py` | End-to-end UQ eval entry point |
+| `scripts/python/replot_metrics.py` | Regenerate training plots from a saved `metrics.json` |
+| `scripts/bash/train.sh` | Training entry point — reads cluster YAML, launches `torchrun` |
+| `scripts/bash/preprocess.sh` | Preprocessing entry point — HF → packed `.npy` shards |
 
-### Model Presets (LlamaModelConfig)
+### Cluster Configs (`configs/clusters/`)
+
+Each YAML specifies hardware (cuda_devices, n_gpus), paths (base_dir, data_dir, output_dir, hf_cache), and full training hyperparams. Available configs: `macross.yaml` (1B LoRA, 2× RTX 3090), `macross_8b.yaml` (8B QLoRA), `a100-1/2/3.yaml`.
+
+The `output_dir` in a cluster config is a base; `train.sh` appends `_seed{N}` to produce the per-seed output directory (e.g., `outputs/lora_1b_seed42/`).
+
+### Checkpoint Layout
+```
+outputs/lora_1b_seed42/
+  checkpoints/
+    step_10000/   # LoRA adapter saved with save_pretrained()
+    final/        # adapter saved at end of training
+  metrics.json    # {steps, loss, lr, tokens_per_sec, val_steps, val_loss}
+  training_metrics.png
+```
+
+### UQ Output Layout
+```
+results/<method>/<label>/<source>/
+  results.json        # per-problem raw results
+  summary.json        # aggregate metrics (accuracy, ECE, coverage, ...)
+  reliability_*.png   # one diagram per confidence measure
+```
+
+### Model Presets (from-scratch LlamaModelConfig)
 - **debug**: ~30M params, 8 layers, 512 hidden
 - **small**: ~125M params
 - **medium**: ~500M params
 - **large**: ~2B params
 
-The model includes dropout support for MC Dropout uncertainty quantification.
+Fine-tuning experiments use `pretrained_model` in TrainConfig / cluster YAML instead of these presets.
