@@ -14,14 +14,13 @@
 #   bash run_eval_1b.sh mc_dropout gsm8k cot 408000 50
 #   bash run_eval_1b.sh mc_dropout gsm8k rag 408000 500
 set -euo pipefail
+CLUSTER=${1:-macross}
+METHOD=${2:-mc_dropout}
+TEST_SOURCE=${3:-all}
+PROMPT=${4:-zero_shot}
+CHECKPOINT_STEP=${5:-}
+LIMIT=${6:-500}
 
-METHOD=${1:-mc_dropout}
-TEST_SOURCE=${2:-all}
-PROMPT=${3:-zero_shot}
-CHECKPOINT_STEP=${4:-}
-LIMIT=${5:-500}
-
-CLUSTER="macross"
 SEED=42
 BASE_MODEL="meta-llama/Llama-3.2-1B-Instruct"
 CONFIG="configs/clusters/${CLUSTER}.yaml"
