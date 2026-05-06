@@ -32,3 +32,6 @@ plotly>=5.0.0
 
 bitsandbytes
 pytest
+
+sentence_transformers
+faiss-cpu
