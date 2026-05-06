@@ -1,22 +1,25 @@
 #!/bin/bash
 # Eval script for Llama-3.2-1B LoRA (rank 16, seed 42)
 #
-# Usage: bash run_eval_1b.sh [method] [test_source] [checkpoint_step] [limit]
-#   method          : mc_dropout (default) | ensemble
+# Usage: bash run_eval_1b.sh [method] [test_source] [prompt] [checkpoint_step] [limit]
+#   method          : mc_dropout
 #   test_source     : all (default) | gsm8k | math | openmath_tail
+#   prompt          : zero_shot (default) | cot | rag
 #   checkpoint_step : step number (default: final); e.g. 408000
 #   limit           : max problems per test set (default: 500; use 50 for a quick check)
 #
 # Examples:
 #   bash run_eval_1b.sh
-#   bash run_eval_1b.sh mc_dropout gsm8k
-#   bash run_eval_1b.sh mc_dropout gsm8k 408000 50
+#   bash run_eval_1b.sh mc_dropout gsm8k zero_shot
+#   bash run_eval_1b.sh mc_dropout gsm8k cot 408000 50
+#   bash run_eval_1b.sh mc_dropout gsm8k rag 408000 500
 set -euo pipefail
 
 METHOD=${1:-mc_dropout}
 TEST_SOURCE=${2:-all}
-CHECKPOINT_STEP=${3:-}
-LIMIT=${4:-500}
+PROMPT=${3:-zero_shot}
+CHECKPOINT_STEP=${4:-}
+LIMIT=${5:-500}
 
 CLUSTER="macross"
 SEED=42
@@ -36,6 +39,7 @@ EOF
 echo "Model       : 1B  ($BASE_MODEL)"
 echo "Method      : $METHOD"
 echo "Test source : $TEST_SOURCE"
+echo "Prompt      : $PROMPT"
 echo "GPU devices : $CUDA_DEVICES"
 
 cd "$BASE_DIR"
@@ -54,10 +58,11 @@ python3 scripts/python/run_uq_eval.py \
     --base-model "$BASE_MODEL" \
     --method "$METHOD" \
     --test-source "$TEST_SOURCE" \
+    --prompt "$PROMPT" \
     --seed "$SEED" \
     --num-passes 20 \
     --mc-dropout-rate 0.0 \
     --max-new-tokens 512 \
     --limit "$LIMIT" \
     $CKPT_STEP_ARG \
-    2>&1 | tee "logs/uq_eval_1b_${METHOD}_${TEST_SOURCE}_$(date +%Y%m%d_%H%M%S).log"
+    2>&1 | tee "logs/uq_eval_1b_${METHOD}_${TEST_SOURCE}_${PROMPT}_$(date +%Y%m%d_%H%M%S).log"

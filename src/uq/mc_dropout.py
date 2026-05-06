@@ -87,22 +87,27 @@ class MCDropoutEvaluator:
         lines = text[idx + len(marker):].strip().splitlines()
         return lines[0].strip() if lines else ""
 
-    def evaluate(self, problems: list[dict]) -> list[dict]:
+    def evaluate(self, problems: list[dict], prompt_fn=None) -> list[dict]:
         """
         Args:
-            problems: list of dicts with keys:
+            problems:  list of dicts with keys:
                 - "problem" (str, required)
                 - "expected_answer" (str, optional — for correctness scoring)
+            prompt_fn: callable(problem: str) -> list[dict]  (chat messages)
+                       Defaults to zero-shot if not provided.
 
         Returns:
             list of dicts, one per problem.
         """
-        _fmt = FormatConfig(include_final_answer=False)
+        if prompt_fn is None:
+            from src.prompts.zero_shot import build_zero_shot_messages
+            prompt_fn = build_zero_shot_messages
+
         results = []
         for item in problems:
-            formatted = format_openmathinstruct2_example({"problem": item["problem"]}, _fmt)
+            messages = prompt_fn(item["problem"])
             prompt = self.tokenizer.apply_chat_template(
-                formatted["prompt_messages"],
+                messages,
                 tokenize=False,
                 add_generation_prompt=True,
             )

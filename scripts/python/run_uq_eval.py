@@ -6,14 +6,9 @@ Usage:
     python scripts/python/run_uq_eval.py \
         --cluster macross \
         --method mc_dropout \
-        --test-source all \
-        --seed 42
-
-    python scripts/python/run_uq_eval.py \
-        --cluster macross \
-        --method ensemble \
         --test-source gsm8k \
-        --ensemble-seeds 42 123 456
+        --prompt zero_shot \
+        --seed 42
 
 Cluster configs are read from configs/clusters/<cluster>.yaml — the same ones
 used by run.sh. GPU selection, HF cache, and output paths are derived from the
@@ -114,25 +109,6 @@ def _build_mc_dropout_evaluator(args, ckpt_path: str):
     return MCDropoutEvaluator(cfg)
 
 
-def _build_ensemble_evaluator(args, output_dir: str):
-    from src.uq.ensemble import EnsembleConfig, EnsembleEvaluator
-
-    paths = [f"{output_dir}_seed{s}/checkpoints/final" for s in args.ensemble_seeds]
-    for p in paths:
-        if not Path(p).exists():
-            sys.exit(f"Ensemble checkpoint not found: {p}")
-
-    cfg = EnsembleConfig(
-        model_paths=paths,
-        base_model=args.base_model,
-        tokenizer_name=args.base_model,
-        max_new_tokens=args.max_new_tokens,
-        device="cuda",
-    )
-    print(f"Loading Ensemble evaluator ({len(paths)} members) ...")
-    return EnsembleEvaluator(cfg)
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -144,7 +120,7 @@ def main():
     ap.add_argument("--cluster", default="macross",
                     choices=["macross", "a100-1", "a100-2", "a100-3"],
                     help="Cluster config — picks paths, GPU, HF cache from configs/clusters/*.yaml")
-    ap.add_argument("--method", required=True, choices=["mc_dropout", "ensemble"])
+    ap.add_argument("--method", required=True, choices=["mc_dropout"])
     ap.add_argument("--test-source", default="all",
                     choices=["openmath_tail", "gsm8k", "math", "all"])
     ap.add_argument("--seed", type=int, default=42,
@@ -158,12 +134,16 @@ def main():
     ap.add_argument("--max-new-tokens", type=int, default=512)
     ap.add_argument("--limit", type=int, default=500,
                     help="Max problems per test set (0 = all; for openmath_tail default 500 applies)")
-    ap.add_argument("--ensemble-seeds", nargs="+", type=int, default=[42, 123, 456],
-                    help="[ensemble] Training seeds whose checkpoints form the ensemble")
     ap.add_argument("--checkpoint-step", type=int, default=None,
                     help="Use step_N checkpoint instead of final (e.g. --checkpoint-step 408000)")
     ap.add_argument("--test-sets-dir", default="",
                     help="Directory for cached test-set JSONLs. Defaults to <data_dir>/../test_sets/")
+    ap.add_argument("--prompt", default="zero_shot", choices=["zero_shot", "cot", "rag"],
+                    help="Prompt style: zero_shot | cot | rag")
+    ap.add_argument("--rag-corpus-dir", default="data/rag_corpus",
+                    help="[rag] Path to the built RAG corpus directory")
+    ap.add_argument("--rag-top-k", type=int, default=3,
+                    help="[rag] Number of examples to retrieve per problem")
     args = ap.parse_args()
 
     # --- Resolve cluster config ---
@@ -186,7 +166,7 @@ def main():
         ckpt_path = f"{paths['output_dir']}/checkpoints/step_{args.checkpoint_step}"
     else:
         ckpt_path = f"{paths['output_dir']}/checkpoints/final"
-    if args.method == "mc_dropout" and not Path(ckpt_path).exists():
+    if not Path(ckpt_path).exists():
         sys.exit(f"Checkpoint not found: {ckpt_path}")
 
     # Base dir for writing results; test sets sit next to the training data dir
@@ -197,11 +177,23 @@ def main():
         else Path(paths["data_dir"]).parent / "test_sets"
     )
 
+    # --- Build prompt function ---
+    if args.prompt == "zero_shot":
+        from src.prompts.zero_shot import build_zero_shot_messages
+        prompt_fn = build_zero_shot_messages
+    elif args.prompt == "cot":
+        from src.prompts.cot import build_cot_messages
+        prompt_fn = build_cot_messages
+    elif args.prompt == "rag":
+        from src.rag.retriever import Retriever
+        from src.prompts.rag import build_rag_messages
+        retriever = Retriever(args.rag_corpus_dir)
+        prompt_fn = lambda p: build_rag_messages(p, retriever.retrieve(p, top_k=args.rag_top_k))
+
+    print(f"Prompt  : {args.prompt}")
+
     # --- Build evaluator once (loaded outside the source loop) ---
-    if args.method == "mc_dropout":
-        evaluator = _build_mc_dropout_evaluator(args, ckpt_path)
-    else:
-        evaluator = _build_ensemble_evaluator(args, paths["base_output_dir"])
+    evaluator = _build_mc_dropout_evaluator(args, ckpt_path)
 
     # --- Per-source evaluation ---
     from src.uq.test_sets import load_or_build
@@ -216,11 +208,11 @@ def main():
         problems = load_or_build(source, test_set_path, limit=args.limit)
         print(f"Problems: {len(problems)}")
 
-        label = f"seed{args.seed}" if args.method == "mc_dropout" else "ensemble"
-        out_dir = base_dir / "results" / args.method / label / source
+        label = f"seed{args.seed}"
+        out_dir = base_dir / "results" / args.method / label / source / args.prompt
 
-        print(f"Running {args.method} ({args.num_passes if args.method == 'mc_dropout' else len(args.ensemble_seeds)} passes/members)...")
-        results = evaluator.evaluate(problems)
+        print(f"Running {args.method} ({args.num_passes} passes)...")
+        results = evaluator.evaluate(problems, prompt_fn=prompt_fn)
 
         summary = summarise(results)
         _write_results(results, summary, out_dir)
