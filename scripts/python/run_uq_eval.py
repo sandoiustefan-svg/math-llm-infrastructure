@@ -118,7 +118,12 @@ def main():
         description="End-to-end UQ evaluation: download data → format → inference → metrics."
     )
     ap.add_argument("--cluster", default="macross",
-                    choices=["macross", "a100-1", "a100-2", "a100-3"],
+                    choices=[
+                        "macross",
+                        "macross_8b",
+                        "fse-4a100-2-1b",
+                        "fse-4a100-2-8b",
+                    ],
                     help="Cluster config — picks paths, GPU, HF cache from configs/clusters/*.yaml")
     ap.add_argument("--method", required=True, choices=["mc_dropout"])
     ap.add_argument("--test-source", default="all",
@@ -152,8 +157,11 @@ def main():
 
     os.environ["HF_HOME"] = paths["hf_cache"]
     # Use first GPU from the cluster's device list for inference (single GPU is sufficient)
-    first_gpu = str(paths["cuda_devices"]).split(",")[0].strip()
-    os.environ["CUDA_VISIBLE_DEVICES"] = first_gpu
+    first_gpu = os.environ.get("CUDA_VISIBLE_DEVICES")
+
+    if first_gpu is None:
+        first_gpu = str(paths["cuda_devices"]).split(",")[0].strip()
+        os.environ["CUDA_VISIBLE_DEVICES"] = first_gpu
     print(f"Cluster : {args.cluster}")
     print(f"GPU     : {first_gpu} (CUDA_VISIBLE_DEVICES={first_gpu})")
     print(f"HF home : {paths['hf_cache']}")
