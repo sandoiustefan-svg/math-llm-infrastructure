@@ -139,7 +139,7 @@ logging:
 
 ### Method — MC Dropout
 
-LoRA dropout (`p=0.05`) is active on all 112 adapter layers during both training and inference. At inference time, `model.train()` keeps dropout active; running the same problem through the model **N=20 times** yields a distribution over answers.
+LoRA dropout (`p=0.05`) is active on all adapter layers during both training and inference. At inference time, `model.train()` keeps dropout active; running the same problem through the model **N=20 times** yields a distribution over answers.
 
 No additional dropout hook is needed — the LoRA adapter dropout is the stochasticity source.
 
@@ -167,42 +167,95 @@ answers = [model.generate(input_ids, ...) for _ in range(20)]
 
 ```bash
 # 1B model — MC Dropout
-bash run_eval_1b.sh [method] [test_source] [checkpoint_step] [limit]
+bash run_eval_1b.sh [method] [test_source] [prompt] [checkpoint_step] [limit]
 
 # 8B model — MC Dropout
-bash run_eval_8b.sh [method] [test_source] [checkpoint_step] [limit]
+bash run_eval_8b.sh [method] [test_source] [prompt] [checkpoint_step] [limit]
 ```
 
 | Argument | Options | Default |
 |---|---|---|
 | `method` | `mc_dropout`, `ensemble` | `mc_dropout` |
-| `test_source` | `all`, `gsm8k`, `math`, `openmath_tail` | `all` |
+| `test_source` | `gsm8k`, `openmath_test` | `gsm8k` |
+| `prompt` | `zero_shot`, `cot`, `rag` | `zero_shot` |
 | `checkpoint_step` | step number or empty (→ `final`) | final |
 | `limit` | max problems per benchmark | 500 |
 
 Examples:
 ```bash
-bash run_eval_1b.sh mc_dropout gsm8k 408000 500
-bash run_eval_1b.sh mc_dropout all 408000 50    # quick check
-bash run_eval_8b.sh mc_dropout all              # final checkpoint
+bash run_eval_1b.sh mc_dropout gsm8k zero_shot 408000 500
+bash run_eval_1b.sh mc_dropout gsm8k cot 408000 500
+bash run_eval_1b.sh mc_dropout gsm8k rag 408000 500
+bash run_eval_8b.sh mc_dropout openmath_test zero_shot    # final checkpoint
 ```
 
 ---
 
-## Experiment Design — 2×2
+## RAG Corpus
 
-The main experimental comparison is a **2×2 factorial design** across model size and prompt style:
+The RAG retrieval corpus is built from three elementary arithmetic word problem datasets that are independent of both OpenMathInstruct-2's construction and the evaluation sets:
 
-|  | Zero-shot | Few-shot CoT |
+| Dataset | Size | Source |
 |---|---|---|
-| **1B LoRA rank 16** | zero-shot accuracy + UQ | CoT accuracy + UQ |
-| **8B LoRA rank 64** | zero-shot accuracy + UQ | CoT accuracy + UQ |
+| SVAMP | ~1 000 | Patel et al., 2021 |
+| ASDiv | ~2 300 | Miao et al., 2020 |
+| MAWPS | ~3 000 | Koncel-Kedziorski et al., 2016 |
+
+These datasets are at GSM8K difficulty level and were not used to construct OpenMathInstruct-2 (which was built exclusively from GSM8K and MATH training problems).
+
+### Corpus pipeline
+
+```
+SVAMP + ASDiv + MAWPS
+    ↓ format: Strategy 3 style  {system, user: problem, assistant: solution + Final Answer}
+    ↓ embed with sentence-transformers (all-MiniLM-L6-v2 or similar)
+    ↓ FAISS index (cosine similarity)
+    ↓ saved to data/rag_corpus/
+
+At inference (RAG prompt):
+    ↓ embed test problem
+    ↓ retrieve top-K most similar problems
+    ↓ prepend as in-context examples before the target problem
+```
+
+### Build the RAG corpus
+
+```bash
+python scripts/python/build_rag_corpus.py \
+    --out-dir data/rag_corpus \
+    --top-k 3
+```
+
+---
+
+## Experiment Design — 2×3
+
+The main experimental comparison is a **2×3 factorial design** across model size and prompt style:
+
+|  | Zero-shot | Few-shot CoT | RAG |
+|---|---|---|---|
+| **1B LoRA rank 16** | accuracy + UQ | accuracy + UQ | accuracy + UQ |
+| **8B LoRA rank 64** | accuracy + UQ | accuracy + UQ | accuracy + UQ |
 
 **Zero-shot**: the model is given only the problem and asked to solve it directly.
 
-**Few-shot CoT (chain-of-thought)**: the prompt includes 3–5 worked examples that demonstrate step-by-step reasoning before the target problem. The model is expected to follow the same pattern. This is *true* CoT — demonstrated reasoning chains, not just "think step by step".
+**Few-shot CoT (chain-of-thought)**: the prompt includes 3–5 hand-written worked examples demonstrating step-by-step reasoning. Fixed — the same examples are used for every test problem.
 
-**Research question**: does chain-of-thought prompting improve the *correlation between model confidence and correctness* (calibration), and does this hold across model sizes?
+**RAG (retrieval-augmented generation)**: the top-K most similar problems from the RAG corpus are retrieved per test problem and prepended as in-context examples. Dynamic — different examples are retrieved for each problem.
+
+All three prompt conditions use the same fine-tuned model weights and the same MC Dropout UQ method (N=20 stochastic passes with LoRA dropout active).
+
+### Test sets
+
+| Test set | Size | Notes |
+|---|---|---|
+| GSM8K test | 1 319 problems | Out-of-distribution — decontaminated from OpenMathInstruct-2 |
+| OpenMathInstruct-2 test shards | ~1.4M rows (10% of shards) | In-distribution — held out from training and validation |
+
+**Research questions**:
+1. Does prompt style (zero-shot → CoT → RAG) improve the *correlation between model confidence and correctness* (calibration)?
+2. Does this effect scale with model size (1B vs 8B)?
+3. Does RAG (dynamic retrieval) improve calibration over CoT (fixed demonstrations)?
 
 Key metrics per cell: accuracy, ECE, confidence–correctness correlation (AUROC), and coverage at confidence thresholds 0.8 / 0.9.
 
@@ -236,9 +289,30 @@ outputs/lora_8b_seed42/
   training_metrics.png           ← 2×2 plot (loss, log loss, LR, throughput)
   loss_curve.png                 ← live loss curve updated every log_every steps
 
+data/
+  rag_corpus/
+    corpus.jsonl                 ← formatted SVAMP + ASDiv + MAWPS problems
+    faiss.index                  ← FAISS cosine similarity index
+    embeddings.npy               ← sentence-transformer embeddings
+    metadata.json                ← dataset sizes, embedding model, top-k default
+
 results/
-  uq_eval_1b_mc_dropout_gsm8k_YYYYMMDD_HHMMSS/
-    results.json                 ← per-problem answers, confidence, correctness
-    summary.json                 ← accuracy, ECE, coverage
-    reliability_diagram.png      ← calibration plot
+  mc_dropout/
+    1b/
+      gsm8k/
+        zero_shot/
+          results.json           ← per-problem answers, confidence, correctness
+          summary.json           ← accuracy, ECE, coverage, AUROC
+          reliability_diagram.png
+        cot/
+          ...
+        rag/
+          ...
+      openmath_test/
+        zero_shot/ cot/ rag/
+    8b/
+      gsm8k/
+        zero_shot/ cot/ rag/
+      openmath_test/
+        zero_shot/ cot/ rag/
 ```
