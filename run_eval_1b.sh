@@ -1,7 +1,8 @@
 #!/bin/bash
 # Eval script for Llama-3.2-1B LoRA (rank 16, seed 42)
 #
-# Usage: bash run_eval_1b.sh [method] [test_source] [prompt] [checkpoint_step] [limit]
+# Usage: bash run_eval_1b.sh [cluster] [method] [test_source] [prompt] [checkpoint_step] [limit]
+#   cluster         : macross (default) | fse-4a100-2-1b
 #   method          : mc_dropout
 #   test_source     : all (default) | gsm8k | math | openmath_tail
 #   prompt          : zero_shot (default) | cot | rag
@@ -10,9 +11,9 @@
 #
 # Examples:
 #   bash run_eval_1b.sh
-#   bash run_eval_1b.sh mc_dropout gsm8k zero_shot
-#   bash run_eval_1b.sh mc_dropout gsm8k cot 408000 50
-#   bash run_eval_1b.sh mc_dropout gsm8k rag 408000 500
+#   bash run_eval_1b.sh macross mc_dropout gsm8k zero_shot
+#   bash run_eval_1b.sh macross mc_dropout gsm8k cot 408000 50
+#   bash run_eval_1b.sh fse-4a100-2-1b mc_dropout gsm8k rag "" 500
 set -euo pipefail
 CLUSTER=${1:-macross}
 METHOD=${2:-mc_dropout}
@@ -60,7 +61,7 @@ python3 scripts/python/run_uq_eval.py \
     --prompt "$PROMPT" \
     --seed "$SEED" \
     --num-passes 20 \
-    --mc-dropout-rate 0.0 \
+    --mc-dropout-rate 0.1 \
     --max-new-tokens 512 \
     --limit "$LIMIT" \
     $CKPT_STEP_ARG \
