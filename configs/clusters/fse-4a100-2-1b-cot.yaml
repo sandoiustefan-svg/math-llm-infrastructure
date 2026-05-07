@@ -1,0 +1,9 @@
+hardware:
+  cuda_devices: "MIG-0fb6bae2-fd70-5e49-921b-9d8c9f43e593"   # GPU 1 — MIG 3g.40gb (40 GB, free)
+  n_gpus: 1
+
+paths:
+  base_dir:   /home/s5549329/math-llm-infrastructure
+  hf_cache:   /home/s5549329/.cache/huggingface
+  data_dir:   /home/s5549329/math-llm-infrastructure/data/processed/openmathinstruct2/shards
+  output_dir: /home/s5549329/math-llm-infrastructure/outputs/lora_1b

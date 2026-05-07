@@ -122,6 +122,8 @@ def main():
                         "macross",
                         "macross_8b",
                         "fse-4a100-2-1b",
+                        "fse-4a100-2-1b-cot",
+                        "fse-4a100-2-1b-rag",
                         "fse-4a100-2-8b",
                     ],
                     help="Cluster config — picks paths, GPU, HF cache from configs/clusters/*.yaml")
