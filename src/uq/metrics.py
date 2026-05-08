@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 _DIGIT_CHARS = set("0123456789")
 _ANSWER_MARKER = "Final Answer:"
+_RANK_INT = {"low": 0, "medium": 1, "high": 2}  # ordinal encoding for similarity ranks
 
 # Weights for Metric 6 (position-weighted token probability).
 # Tokens are assigned a weight based on their region:
@@ -313,6 +314,280 @@ def _weighted_geometric_mean(token_probs: list[float], weights: list[float]) -> 
     }
 
 
+def auroc(results: list[dict], confidence_key: str = "confidence") -> float:
+    """Area Under the ROC Curve — how well confidence discriminates correct from incorrect."""
+    labeled = [
+        (float(r[confidence_key]), int(bool(r["correct"])))
+        for r in results
+        if r.get("correct") is not None
+        and confidence_key in r
+        and not math.isnan(float(r[confidence_key]))
+    ]
+    if not labeled:
+        return float("nan")
+    n_pos = sum(c for _, c in labeled)
+    n_neg = len(labeled) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    labeled.sort(key=lambda x: -x[0])
+    tp = fp = 0
+    prev_tpr = prev_fpr = 0.0
+    auc = 0.0
+    for _, correct in labeled:
+        if correct:
+            tp += 1
+        else:
+            fp += 1
+        tpr = tp / n_pos
+        fpr = fp / n_neg
+        auc += (fpr - prev_fpr) * (tpr + prev_tpr) / 2
+        prev_tpr, prev_fpr = tpr, fpr
+    return round(auc, 4)
+
+
+def _spearman_from_lists(xs: list[float], ys: list[float]) -> float:
+    """Spearman rank correlation between two equal-length lists."""
+    n = len(xs)
+    if n < 2:
+        return float("nan")
+
+    def _ranks(lst: list) -> list[float]:
+        order = sorted(range(n), key=lambda i: lst[i])
+        ranks = [0.0] * n
+        i = 0
+        while i < n:
+            j = i
+            while j < n - 1 and lst[order[j + 1]] == lst[order[j]]:
+                j += 1
+            avg = (i + j) / 2.0 + 1.0
+            for k in range(i, j + 1):
+                ranks[order[k]] = avg
+            i = j + 1
+        return ranks
+
+    rx, ry = _ranks(xs), _ranks(ys)
+    mx, my = sum(rx) / n, sum(ry) / n
+    num = sum((rx[i] - mx) * (ry[i] - my) for i in range(n))
+    den = math.sqrt(
+        sum((r - mx) ** 2 for r in rx) *
+        sum((r - my) ** 2 for r in ry)
+    )
+    return round(num / den, 4) if den else float("nan")
+
+
+def spearman_correlation(results: list[dict], confidence_key: str = "confidence") -> float:
+    """Spearman rank correlation between confidence and binary correctness."""
+    labeled = [
+        (float(r[confidence_key]), int(bool(r["correct"])))
+        for r in results
+        if r.get("correct") is not None
+        and confidence_key in r
+        and not math.isnan(float(r[confidence_key]))
+    ]
+    if len(labeled) < 2:
+        return float("nan")
+    return _spearman_from_lists([x[0] for x in labeled], [x[1] for x in labeled])
+
+
+def overconfidence_analysis(
+    results: list[dict],
+    confidence_key: str = "confidence",
+    threshold: float = 0.8,
+) -> dict:
+    """
+    Quadrant analysis: (high/low confidence) × (correct/wrong).
+    The high-confidence + wrong cell is the epistemic uncertainty gap —
+    cases where the model has no internal signal that it is wrong.
+    """
+    labeled = [
+        r for r in results
+        if r.get("correct") is not None
+        and confidence_key in r
+        and not math.isnan(float(r[confidence_key]))
+    ]
+    if not labeled:
+        return {}
+    hc_right = sum(1 for r in labeled if float(r[confidence_key]) >= threshold and r["correct"])
+    hc_wrong = sum(1 for r in labeled if float(r[confidence_key]) >= threshold and not r["correct"])
+    lc_right = sum(1 for r in labeled if float(r[confidence_key]) <  threshold and r["correct"])
+    lc_wrong = sum(1 for r in labeled if float(r[confidence_key]) <  threshold and not r["correct"])
+    n_high = hc_right + hc_wrong
+    return {
+        "high_conf_correct":   hc_right,
+        "high_conf_wrong":     hc_wrong,
+        "low_conf_correct":    lc_right,
+        "low_conf_wrong":      lc_wrong,
+        "overconfidence_rate": round(hc_wrong / n_high, 4) if n_high else float("nan"),
+    }
+
+
+def auroc_sim(results: list[dict], confidence_key: str = "confidence") -> float:
+    """AUROC using similarity_rank == 'high' as the positive class (vs low + medium)."""
+    labeled = [
+        (float(r[confidence_key]), int(r.get("similarity_rank") == "high"))
+        for r in results
+        if r.get("similarity_rank") in _RANK_INT
+        and confidence_key in r
+        and not math.isnan(float(r[confidence_key]))
+    ]
+    if not labeled:
+        return float("nan")
+    n_pos = sum(c for _, c in labeled)
+    n_neg = len(labeled) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    labeled.sort(key=lambda x: -x[0])
+    tp = fp = 0
+    prev_tpr = prev_fpr = 0.0
+    auc = 0.0
+    for _, pos in labeled:
+        if pos:
+            tp += 1
+        else:
+            fp += 1
+        tpr = tp / n_pos
+        fpr = fp / n_neg
+        auc += (fpr - prev_fpr) * (tpr + prev_tpr) / 2
+        prev_tpr, prev_fpr = tpr, fpr
+    return round(auc, 4)
+
+
+def spearman_sim(results: list[dict], confidence_key: str = "confidence") -> float:
+    """Spearman correlation between confidence and ordinal similarity rank (low=0/medium=1/high=2)."""
+    labeled = [
+        (float(r[confidence_key]), _RANK_INT[r["similarity_rank"]])
+        for r in results
+        if r.get("similarity_rank") in _RANK_INT
+        and confidence_key in r
+        and not math.isnan(float(r[confidence_key]))
+    ]
+    if len(labeled) < 2:
+        return float("nan")
+    return _spearman_from_lists([x[0] for x in labeled], [x[1] for x in labeled])
+
+
+def expected_calibration_error_sim(
+    results: list[dict],
+    n_bins: int = 10,
+    confidence_key: str = "confidence",
+) -> float:
+    """
+    ECE-style calibration against mean_raw_similarity instead of binary accuracy.
+    Measures whether a model's confidence matches how semantically correct its output is.
+    """
+    labeled = [
+        r for r in results
+        if not math.isnan(r.get("mean_raw_similarity", float("nan")))
+        and confidence_key in r
+        and not math.isnan(float(r[confidence_key]))
+    ]
+    if not labeled:
+        return float("nan")
+
+    bins: list[list] = [[] for _ in range(n_bins)]
+    for r in labeled:
+        idx = min(int(float(r[confidence_key]) * n_bins), n_bins - 1)
+        bins[idx].append(r)
+
+    ece = 0.0
+    for b in bins:
+        if not b:
+            continue
+        mean_sim  = sum(r["mean_raw_similarity"] for r in b) / len(b)
+        mean_conf = sum(float(r[confidence_key]) for r in b) / len(b)
+        ece += (len(b) / len(labeled)) * abs(mean_sim - mean_conf)
+    return round(ece, 4)
+
+
+def plot_reliability_diagram_sim(
+    results: list[dict],
+    output_path: str,
+    n_bins: int = 10,
+    confidence_key: str = "confidence",
+    title: str | None = None,
+) -> None:
+    """
+    Reliability diagram where the y-axis shows mean embedding similarity per bin
+    instead of binary accuracy. Diagnoses whether confidence tracks semantic correctness.
+    """
+    labeled = [
+        r for r in results
+        if not math.isnan(r.get("mean_raw_similarity", float("nan")))
+        and confidence_key in r
+        and not math.isnan(float(r[confidence_key]))
+    ]
+    if not labeled:
+        return
+
+    bin_sims, bin_confs = [], []
+    for i in range(n_bins):
+        lo, hi = i / n_bins, (i + 1) / n_bins
+        b = [r for r in labeled if lo <= float(r[confidence_key]) < hi]
+        if not b:
+            continue
+        bin_sims.append(sum(r["mean_raw_similarity"] for r in b) / len(b))
+        bin_confs.append(sum(float(r[confidence_key]) for r in b) / len(b))
+
+    ece_sim = expected_calibration_error_sim(results, n_bins, confidence_key)
+    label = title or confidence_key.replace("_", " ").title()
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.bar(bin_confs, bin_sims, width=1 / n_bins, align="center", alpha=0.7,
+           color="steelblue", label="Mean similarity")
+    ax.plot([0, 1], [0, 1], "k--", linewidth=1, label="Perfect calibration")
+    ax.set_xlabel("Confidence")
+    ax.set_ylabel("Mean embedding similarity")
+    ax.set_title(f"{label}  (ECE-sim = {ece_sim:.3f})")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_confidence_distribution_3way(
+    results: list[dict],
+    output_path: str,
+    confidence_key: str = "confidence",
+    title: str | None = None,
+) -> None:
+    """
+    Three overlapping confidence histograms split by similarity rank (low/medium/high).
+    Well-separated distributions indicate the confidence measure discriminates all three levels.
+    """
+    bins = [i / 20 for i in range(21)]
+    rank_confs: dict[str, list[float]] = {"low": [], "medium": [], "high": []}
+    for r in results:
+        rank = r.get("similarity_rank")
+        if rank not in rank_confs:
+            continue
+        if confidence_key not in r or math.isnan(float(r[confidence_key])):
+            continue
+        rank_confs[rank].append(float(r[confidence_key]))
+
+    if not any(rank_confs.values()):
+        return
+
+    colours = {"low": "tomato", "medium": "gold", "high": "steelblue"}
+    label_map = {"low": "Low (<0.3)", "medium": "Medium (0.3–0.7)", "high": "High (>0.7)"}
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    for rank in ("low", "medium", "high"):
+        if rank_confs[rank]:
+            ax.hist(rank_confs[rank], bins=bins, alpha=0.55,
+                    label=label_map[rank], color=colours[rank], density=True)
+
+    display_label = title or confidence_key.replace("_", " ").title()
+    ax.set_xlabel("Confidence")
+    ax.set_ylabel("Density")
+    ax.set_title(f"Confidence by Similarity Rank — {display_label}")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
 def answer_entropy(answers: list[str]) -> float:
     """
     Predictive entropy over a discrete answer distribution.
@@ -422,69 +697,148 @@ def plot_reliability_diagram(
     plt.close(fig)
 
 
+def plot_selective_prediction(
+    results: list[dict],
+    output_path: str,
+) -> None:
+    """
+    Accuracy vs coverage curves for all confidence measures on one plot.
+    A useful UQ signal produces a curve that rises steeply as coverage decreases
+    (high-confidence predictions are more often correct).
+    """
+    conf_keys = {
+        "Majority-vote": "confidence",
+        "Weighted":      "weighted_mean_confidence",
+    }
+    labeled = [r for r in results if r.get("correct") is not None]
+    if not labeled:
+        return
+    n = len(labeled)
+    baseline = sum(bool(r["correct"]) for r in labeled) / n
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    for label, key in conf_keys.items():
+        valid = [
+            (float(r[key]), bool(r["correct"]))
+            for r in labeled
+            if key in r and not math.isnan(float(r[key]))
+        ]
+        if not valid:
+            continue
+        valid.sort(key=lambda x: -x[0])
+        coverages, accuracies, correct_so_far = [], [], 0
+        for i, (_, correct) in enumerate(valid):
+            if correct:
+                correct_so_far += 1
+            coverages.append((i + 1) / n)
+            accuracies.append(correct_so_far / (i + 1))
+        ax.plot(coverages, accuracies, label=label)
+
+    ax.axhline(baseline, color="gray", linestyle="--", linewidth=1,
+               label=f"Overall accuracy ({baseline:.2f})")
+    ax.set_xlabel("Coverage (fraction of problems included)")
+    ax.set_ylabel("Accuracy on included problems")
+    ax.set_title("Selective Prediction: Accuracy vs Coverage")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_confidence_distribution(
+    results: list[dict],
+    output_path: str,
+    confidence_key: str = "confidence",
+    title: str | None = None,
+) -> None:
+    """
+    Confidence histograms split by correctness.
+    Well-separated distributions indicate the measure discriminates well.
+    """
+    labeled = [
+        r for r in results
+        if r.get("correct") is not None
+        and confidence_key in r
+        and not math.isnan(float(r[confidence_key]))
+    ]
+    if not labeled:
+        return
+    correct_confs   = [float(r[confidence_key]) for r in labeled if r["correct"]]
+    incorrect_confs = [float(r[confidence_key]) for r in labeled if not r["correct"]]
+    bins = [i / 20 for i in range(21)]
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.hist(correct_confs,   bins=bins, alpha=0.6, label="Correct",   density=True)
+    ax.hist(incorrect_confs, bins=bins, alpha=0.6, label="Incorrect", density=True)
+    label = title or confidence_key.replace("_", " ").title()
+    ax.set_xlabel("Confidence")
+    ax.set_ylabel("Density")
+    ax.set_title(f"Confidence Distribution — {label}")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
 def summarise(results: list[dict]) -> dict:
     """
-    Aggregate summary of UQ evaluation results across all four confidence measures.
+    Aggregate summary focused on confidence-correctness alignment.
+    Reports calibration (ECE), discrimination (AUROC), correlation (Spearman),
+    and the overconfidence quadrant for each confidence measure.
     """
-    labeled  = [r for r in results if r["correct"] is not None]
-    n_total  = len(results)
+    labeled   = [r for r in results if r["correct"] is not None]
+    n_total   = len(results)
     n_labeled = len(labeled)
 
-    accuracy    = sum(1 for r in labeled if r["correct"]) / n_labeled if n_labeled else float("nan")
-    mean_conf   = sum(r["confidence"] for r in results) / n_total if n_total else float("nan")
+    accuracy     = sum(1 for r in labeled if r["correct"]) / n_labeled if n_labeled else float("nan")
+    mean_conf    = sum(r["confidence"] for r in results) / n_total if n_total else float("nan")
     mean_entropy = sum(r["entropy"] for r in results) / n_total if n_total else float("nan")
-    ece         = expected_calibration_error(results)
-    coverage_80 = sum(1 for r in results if r["confidence"] >= 0.8) / n_total if n_total else float("nan")
-    coverage_90 = sum(1 for r in results if r["confidence"] >= 0.9) / n_total if n_total else float("nan")
 
     def _mean(key):
         vals = [r[key] for r in results if key in r and not math.isnan(r[key])]
         return round(sum(vals) / len(vals), 6) if vals else float("nan")
 
-    # ECE for every confidence measure
-    ece_answer        = expected_calibration_error(results, confidence_key="confidence")
-    ece_full_seq      = expected_calibration_error(results, confidence_key="full_sequence_mean_confidence")
-    ece_answer_span   = expected_calibration_error(results, confidence_key="answer_span_mean_confidence")
-    ece_numeric       = expected_calibration_error(results, confidence_key="numeric_mean_confidence")
-    ece_numeric_span  = expected_calibration_error(results, confidence_key="numeric_span_mean_confidence")
-    ece_weighted      = expected_calibration_error(results, confidence_key="weighted_mean_confidence")
+    oc = overconfidence_analysis(results)
 
     return {
         "n_problems": n_total,
-        "n_labeled": n_labeled,
-        "accuracy": round(accuracy, 4),
+        "n_labeled":  n_labeled,
+        "accuracy":   round(accuracy, 4),
 
-        # --- Answer-level UQ (agreement across passes/members) ---
+        # --- Answer-level UQ ---
         "mean_answer_confidence": round(mean_conf, 4),
-        "mean_answer_entropy": round(mean_entropy, 4),
-        "ece_answer_confidence": round(ece_answer, 4),
-        "coverage_at_0.8_confidence": round(coverage_80, 4),
-        "coverage_at_0.9_confidence": round(coverage_90, 4),
-
-        # --- Token-level: full sequence (baseline — inflated by glue words) ---
-        "mean_full_sequence_confidence": _mean("full_sequence_mean_confidence"),
-        "mean_full_sequence_perplexity": _mean("full_sequence_perplexity"),
-        "ece_full_sequence": round(ece_full_seq, 4),
-
-        # --- Token-level: answer span only ---
-        "mean_answer_span_confidence": _mean("answer_span_mean_confidence"),
-        "mean_answer_span_perplexity": _mean("answer_span_perplexity"),
-        "ece_answer_span": round(ece_answer_span, 4),
-
-        # --- Token-level: numeric tokens — full sequence ---
-        "mean_numeric_confidence": _mean("numeric_mean_confidence"),
-        "mean_numeric_perplexity": _mean("numeric_perplexity"),
-        "mean_numeric_min_prob": _mean("numeric_min_token_prob"),
-        "ece_numeric_full": round(ece_numeric, 4),
-
-        # --- Token-level: numeric tokens — answer span only ---
-        "mean_numeric_span_confidence": _mean("numeric_span_mean_confidence"),
-        "mean_numeric_span_perplexity": _mean("numeric_span_perplexity"),
-        "mean_numeric_span_min_prob": _mean("numeric_span_min_token_prob"),
-        "ece_numeric_span": round(ece_numeric_span, 4),
-
-        # --- Token-level: position-weighted (Metric 6) ---
+        "mean_answer_entropy":    round(mean_entropy, 4),
         "mean_weighted_confidence": _mean("weighted_mean_confidence"),
-        "mean_weighted_perplexity": _mean("weighted_perplexity"),
-        "ece_weighted": round(ece_weighted, 4),
+
+        # --- Overconfidence quadrant (majority-vote, threshold=0.8) ---
+        "overconf_high_conf_correct": oc.get("high_conf_correct"),
+        "overconf_high_conf_wrong":   oc.get("high_conf_wrong"),
+        "overconf_low_conf_correct":  oc.get("low_conf_correct"),
+        "overconf_low_conf_wrong":    oc.get("low_conf_wrong"),
+        "overconf_rate":              oc.get("overconfidence_rate"),
+
+        # --- Calibration: ECE (binary correctness) ---
+        "ece_confidence": round(expected_calibration_error(results, confidence_key="confidence"), 4),
+        "ece_weighted":   round(expected_calibration_error(results, confidence_key="weighted_mean_confidence"), 4),
+
+        # --- Discrimination: AUROC (binary correctness) ---
+        "auroc_confidence": auroc(results, confidence_key="confidence"),
+        "auroc_weighted":   auroc(results, confidence_key="weighted_mean_confidence"),
+
+        # --- Embedding similarity aggregate ---
+        "mean_raw_similarity":     _mean("mean_raw_similarity"),
+        "mean_std_raw_similarity": _mean("std_raw_similarity"),
+        "sim_rank_low":    sum(1 for r in results if r.get("similarity_rank") == "low"),
+        "sim_rank_medium": sum(1 for r in results if r.get("similarity_rank") == "medium"),
+        "sim_rank_high":   sum(1 for r in results if r.get("similarity_rank") == "high"),
+
+        # --- Calibration: ECE (embedding similarity) ---
+        "ece_sim_confidence": expected_calibration_error_sim(results, confidence_key="confidence"),
+        "ece_sim_weighted":   expected_calibration_error_sim(results, confidence_key="weighted_mean_confidence"),
+
+        # --- Discrimination: AUROC (embedding similarity — high vs low+medium) ---
+        "auroc_sim_confidence": auroc_sim(results, confidence_key="confidence"),
+        "auroc_sim_weighted":   auroc_sim(results, confidence_key="weighted_mean_confidence"),
     }

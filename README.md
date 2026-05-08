@@ -154,14 +154,30 @@ answers = [model.generate(input_ids, ...) for _ in range(20)]
 
 ### UQ metrics
 
+**Confidence signals (2 per problem)**
+
+| Key | What it measures |
+|---|---|
+| `confidence` | Majority-vote fraction across 20 passes — answer-level |
+| `weighted_mean_confidence` | Weighted geometric mean token prob (numeric answer-span tokens = 25×) — token-level |
+
+**Correctness signals (2 per problem)**
+
+| Key | What it measures |
+|---|---|
+| `correct` | Binary string match on extracted final answer |
+| `mean_raw_similarity` | Mean cosine similarity between raw outputs and expected answer (`all-MiniLM-L6-v2`) |
+| `similarity_rank` | `low` (< 0.3) / `medium` (0.3–0.7) / `high` (> 0.7) |
+
+**Aggregate metrics (per cell in summary.json)**
+
 | Metric | Meaning |
 |---|---|
-| `confidence` | Fraction of passes agreeing with the majority answer |
-| `entropy` | Spread of answer distribution (0 = unanimous) |
-| `token_mean_confidence` | Geometric mean token probability across the generation |
-| `token_perplexity` | Inverse of token confidence |
-| `token_min_prob` | Probability of the least-certain token |
-| `ece` | Expected Calibration Error — does confidence=0.8 mean 80% accuracy? |
+| `ece_*` | Expected Calibration Error — does confidence=0.8 mean 80% accuracy? |
+| `auroc_*` | AUROC — does higher confidence rank correct problems above incorrect ones? |
+| `ece_sim_*` | ECE against mean embedding similarity instead of binary accuracy |
+| `auroc_sim_*` | AUROC with high similarity rank as positive class |
+| `overconf_rate` | Fraction of high-confidence (≥ 0.8) predictions that are wrong |
 
 ### Evaluation scripts
 
@@ -175,9 +191,9 @@ bash run_eval_8b.sh [method] [test_source] [prompt] [checkpoint_step] [limit]
 
 | Argument | Options | Default |
 |---|---|---|
-| `method` | `mc_dropout`, `ensemble` | `mc_dropout` |
-| `test_source` | `gsm8k`, `openmath_test` | `gsm8k` |
-| `prompt` | `zero_shot`, `cot`, `rag` | `zero_shot` |
+| `method` | `mc_dropout` | `mc_dropout` |
+| `test_source` | `gsm8k`, `math`, `all` | `gsm8k` |
+| `prompt` | `zero_shot`, `cot` | `zero_shot` |
 | `checkpoint_step` | step number or empty (→ `final`) | final |
 | `limit` | max problems per benchmark | 500 |
 
@@ -185,79 +201,56 @@ Examples:
 ```bash
 bash run_eval_1b.sh mc_dropout gsm8k zero_shot 408000 500
 bash run_eval_1b.sh mc_dropout gsm8k cot 408000 500
-bash run_eval_1b.sh mc_dropout gsm8k rag 408000 500
-bash run_eval_8b.sh mc_dropout openmath_test zero_shot    # final checkpoint
+bash run_eval_8b.sh mc_dropout all zero_shot    # final checkpoint, GSM8K + MATH
 ```
+
+### Embedding similarity
+
+Embedding similarity is computed automatically at the end of each evaluation run —
+no separate step needed. `all-MiniLM-L6-v2` is loaded once alongside the LLM and
+scores every problem before `results.json` is written.
+
+Fields added to each problem: `raw_similarities`, `mean_raw_similarity`,
+`std_raw_similarity`, `similarity_rank`.
 
 ---
 
-## RAG Corpus
+## Experiment Design — 2×2
 
-The RAG retrieval corpus is built from three elementary arithmetic word problem datasets that are independent of both OpenMathInstruct-2's construction and the evaluation sets:
+The main experimental comparison is a **2×2 factorial design** across model size and prompt style:
 
-| Dataset | Size | Source |
+|  | Zero-shot | Few-shot CoT |
 |---|---|---|
-| SVAMP | ~1 000 | Patel et al., 2021 |
-| ASDiv | ~2 300 | Miao et al., 2020 |
-| MAWPS | ~3 000 | Koncel-Kedziorski et al., 2016 |
-
-These datasets are at GSM8K difficulty level and were not used to construct OpenMathInstruct-2 (which was built exclusively from GSM8K and MATH training problems).
-
-### Corpus pipeline
-
-```
-SVAMP + ASDiv + MAWPS
-    ↓ format: Strategy 3 style  {system, user: problem, assistant: solution + Final Answer}
-    ↓ embed with sentence-transformers (all-MiniLM-L6-v2 or similar)
-    ↓ FAISS index (cosine similarity)
-    ↓ saved to data/rag_corpus/
-
-At inference (RAG prompt):
-    ↓ embed test problem
-    ↓ retrieve top-K most similar problems
-    ↓ prepend as in-context examples before the target problem
-```
-
-### Build the RAG corpus
-
-```bash
-python scripts/python/build_rag_corpus.py \
-    --out-dir data/rag_corpus \
-    --top-k 3
-```
-
----
-
-## Experiment Design — 2×3
-
-The main experimental comparison is a **2×3 factorial design** across model size and prompt style:
-
-|  | Zero-shot | Few-shot CoT | RAG |
-|---|---|---|---|
-| **1B LoRA rank 16** | accuracy + UQ | accuracy + UQ | accuracy + UQ |
-| **8B LoRA rank 64** | accuracy + UQ | accuracy + UQ | accuracy + UQ |
+| **1B LoRA rank 16** | accuracy + UQ | accuracy + UQ |
+| **8B LoRA rank 64** | accuracy + UQ | accuracy + UQ |
 
 **Zero-shot**: the model is given only the problem and asked to solve it directly.
 
-**Few-shot CoT (chain-of-thought)**: the prompt includes 3–5 hand-written worked examples demonstrating step-by-step reasoning. Fixed — the same examples are used for every test problem.
+**Few-shot CoT (chain-of-thought)**: the prompt includes 3 hand-written worked examples demonstrating step-by-step reasoning. Fixed — the same examples are used for every test problem.
 
-**RAG (retrieval-augmented generation)**: the top-K most similar problems from the RAG corpus are retrieved per test problem and prepended as in-context examples. Dynamic — different examples are retrieved for each problem.
+Both prompt conditions use the same fine-tuned model weights and MC Dropout (N=20 stochastic passes with LoRA dropout active).
 
-All three prompt conditions use the same fine-tuned model weights and the same MC Dropout UQ method (N=20 stochastic passes with LoRA dropout active).
+### Correctness evaluation
+
+Each cell is evaluated with two correctness signals applied post-hoc:
+
+1. **Binary** — string match on the extracted final answer (`answers_are_equal`)
+2. **Embedding similarity** — cosine similarity between the full chain-of-thought output and the expected answer (`all-MiniLM-L6-v2`), bucketed into `low` / `medium` / `high` ranks
 
 ### Test sets
 
 | Test set | Size | Notes |
 |---|---|---|
-| GSM8K test | 1 319 problems | Out-of-distribution — decontaminated from OpenMathInstruct-2 |
-| OpenMathInstruct-2 test shards | ~1.4M rows (10% of shards) | In-distribution — held out from training and validation |
+| GSM8K test | 1 319 problems | Out-of-distribution — grade-school arithmetic |
+| MATH test | ~5 000 problems | Out-of-distribution — competition mathematics |
 
-**Research questions**:
-1. Does prompt style (zero-shot → CoT → RAG) improve the *correlation between model confidence and correctness* (calibration)?
-2. Does this effect scale with model size (1B vs 8B)?
-3. Does RAG (dynamic retrieval) improve calibration over CoT (fixed demonstrations)?
+### Research questions
 
-Key metrics per cell: accuracy, ECE, confidence–correctness correlation (AUROC), and coverage at confidence thresholds 0.8 / 0.9.
+1. How well does model confidence correlate with correctness (binary and embedding similarity)?
+2. Does CoT prompting improve the confidence–correctness alignment compared to zero-shot?
+3. Does this effect scale with model size (1B vs 8B)?
+
+Key metrics per cell: accuracy, ECE, AUROC (confidence–correctness discrimination), Spearman correlation, overconfidence rate, and mean embedding similarity.
 
 ---
 
@@ -289,30 +282,23 @@ outputs/lora_8b_seed42/
   training_metrics.png           ← 2×2 plot (loss, log loss, LR, throughput)
   loss_curve.png                 ← live loss curve updated every log_every steps
 
-data/
-  rag_corpus/
-    corpus.jsonl                 ← formatted SVAMP + ASDiv + MAWPS problems
-    faiss.index                  ← FAISS cosine similarity index
-    embeddings.npy               ← sentence-transformer embeddings
-    metadata.json                ← dataset sizes, embedding model, top-k default
-
 results/
   mc_dropout/
-    1b/
+    seed42/
       gsm8k/
         zero_shot/
-          results.json           ← per-problem answers, confidence, correctness
-          summary.json           ← accuracy, ECE, coverage, AUROC
-          reliability_diagram.png
+          results.json           ← per-problem: answers, confidence, correctness, embedding similarity
+          summary.json           ← accuracy, ECE, AUROC, overconf_rate (binary + sim)
+          confidence/
+            selective_prediction.png
+          binary_correctness/
+            reliability_confidence.png
+            reliability_weighted_mean_confidence.png
+          embedding_similarity/
+            reliability_sim_confidence.png
+            reliability_sim_weighted_mean_confidence.png
         cot/
           ...
-        rag/
-          ...
-      openmath_test/
-        zero_shot/ cot/ rag/
-    8b/
-      gsm8k/
-        zero_shot/ cot/ rag/
-      openmath_test/
-        zero_shot/ cot/ rag/
+      math/
+        zero_shot/ cot/
 ```

@@ -6,10 +6,12 @@ from typing import Optional
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
 
 import math
 from src.uq.metrics import answer_entropy, answers_are_equal, token_probability_confidence
-from src.data.format_openmathinstruct2 import FormatConfig, format_openmathinstruct2_example
+from src.prompts.zero_shot import build_zero_shot_messages
+
 
 
 @dataclass
@@ -42,9 +44,10 @@ class MCDropoutEvaluator:
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
+        # this loads the 1B/8B Llama model (base model)
         base = AutoModelForCausalLM.from_pretrained(cfg.base_model, torch_dtype=torch.bfloat16)
         if (Path(cfg.model_path) / "adapter_config.json").exists():
-            from peft import PeftModel
+            # this loads the Lora metrices on top of the base model
             self.model = PeftModel.from_pretrained(base, cfg.model_path)
         else:
             self.model = base
@@ -54,10 +57,6 @@ class MCDropoutEvaluator:
         # but transformers warns about them on every generate() call otherwise.
         self.model.generation_config.temperature = None
         self.model.generation_config.top_p = None
-
-        if cfg.mc_dropout_rate > 0:
-            from src.training.trainer import _add_mc_dropout_hook
-            _add_mc_dropout_hook(self.model, cfg.mc_dropout_rate)
 
         # Keep dropout active — this is the key difference from standard inference.
         self.model.train()
@@ -80,12 +79,17 @@ class MCDropoutEvaluator:
 
     @staticmethod
     def _extract_final_answer(text: str) -> str:
+        import re
         marker = "Final Answer:"
         idx = text.find(marker)
-        if idx == -1:
-            return text.strip()
-        lines = text[idx + len(marker):].strip().splitlines()
-        return lines[0].strip() if lines else ""
+        if idx != -1:
+            lines = text[idx + len(marker):].strip().splitlines()
+            return lines[0].strip() if lines else ""
+        # fallback: last \boxed{...} in the response
+        boxes = re.findall(r"\\boxed\{([^}]+)\}", text)
+        if boxes:
+            return boxes[-1].strip()
+        return ""
 
     def evaluate(self, problems: list[dict], prompt_fn=None) -> list[dict]:
         """
@@ -100,7 +104,6 @@ class MCDropoutEvaluator:
             list of dicts, one per problem.
         """
         if prompt_fn is None:
-            from src.prompts.zero_shot import build_zero_shot_messages
             prompt_fn = build_zero_shot_messages
 
         results = []
@@ -174,10 +177,6 @@ class MCDropoutEvaluator:
                 # Position-weighted token probability (Metric 6)
                 "weighted_mean_confidence":      _avg("weighted_mean_confidence"),
                 "weighted_perplexity":           _avg("weighted_perplexity"),
-                # Legacy keys kept for backwards compatibility
-                "token_mean_confidence":         _avg("full_sequence_mean_confidence"),
-                "token_perplexity":              _avg("full_sequence_perplexity"),
-                "token_min_prob":                _avg("full_sequence_min_token_prob"),
             })
 
         return results

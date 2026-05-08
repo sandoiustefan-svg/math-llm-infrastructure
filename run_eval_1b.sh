@@ -2,18 +2,16 @@
 # Eval script for Llama-3.2-1B LoRA (rank 16, seed 42)
 #
 # Usage: bash run_eval_1b.sh [cluster] [method] [test_source] [prompt] [checkpoint_step] [limit]
-#   cluster         : macross (default) | fse-4a100-2-1b
+#   cluster         : macross (default) | fse-4a100-2-1b | fse-4a100-2-1b-cot
 #   method          : mc_dropout
-#   test_source     : all (default) | gsm8k | math | openmath_tail
-#   prompt          : zero_shot (default) | cot | rag
+#   test_source     : all (default) | gsm8k | math
+#   prompt          : zero_shot (default) | cot
 #   checkpoint_step : step number (default: final); e.g. 408000
 #   limit           : max problems per test set (default: 500; use 50 for a quick check)
 #
 # Examples:
-#   bash run_eval_1b.sh
-#   bash run_eval_1b.sh macross mc_dropout gsm8k zero_shot
-#   bash run_eval_1b.sh macross mc_dropout gsm8k cot 408000 50
-#   bash run_eval_1b.sh fse-4a100-2-1b mc_dropout gsm8k rag "" 500
+#   bash run_eval_1b.sh fse-4a100-2-1b mc_dropout all zero_shot 408000 500
+#   bash run_eval_1b.sh fse-4a100-2-1b-cot mc_dropout all cot 408000 500
 set -euo pipefail
 CLUSTER=${1:-macross}
 METHOD=${2:-mc_dropout}

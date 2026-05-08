@@ -72,21 +72,28 @@ def _write_results(results: list[dict], summary: dict, out_dir: Path) -> None:
     print(f"Summary  → {summary_path}")
 
 
-def _plot_all_reliability_diagrams(results: list[dict], out_dir: Path) -> None:
-    from src.uq.metrics import plot_reliability_diagram
+_CONF_KEYS = [
+    ("confidence",            "Majority Vote Confidence"),
+    ("weighted_mean_confidence", "Weighted Mean Confidence"),
+]
 
-    conf_keys = [
-        "confidence",
-        "full_sequence_mean_confidence",
-        "answer_span_mean_confidence",
-        "numeric_mean_confidence",
-        "numeric_span_mean_confidence",
-        "weighted_mean_confidence",
-    ]
-    for key in conf_keys:
-        out_path = str(out_dir / f"reliability_{key}.png")
-        plot_reliability_diagram(results, out_path, confidence_key=key, title=key.replace("_", " ").title())
-        print(f"Diagram  → {out_path}")
+
+def _plot_binary_correctness(results: list[dict], out_dir: Path) -> None:
+    from src.uq.metrics import plot_reliability_diagram
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for key, title in _CONF_KEYS:
+        p = str(out_dir / f"reliability_{key}.png")
+        plot_reliability_diagram(results, p, confidence_key=key, title=title)
+        print(f"Reliability      → {p}")
+
+
+def _plot_embedding_similarity(results: list[dict], out_dir: Path) -> None:
+    from src.uq.metrics import plot_reliability_diagram_sim
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for key, title in _CONF_KEYS:
+        p = str(out_dir / f"reliability_sim_{key}.png")
+        plot_reliability_diagram_sim(results, p, confidence_key=key, title=title)
+        print(f"Reliability-sim  → {p}")
 
 
 # ---------------------------------------------------------------------------
@@ -123,13 +130,12 @@ def main():
                         "macross_8b",
                         "fse-4a100-2-1b",
                         "fse-4a100-2-1b-cot",
-                        "fse-4a100-2-1b-rag",
                         "fse-4a100-2-8b",
                     ],
                     help="Cluster config — picks paths, GPU, HF cache from configs/clusters/*.yaml")
     ap.add_argument("--method", required=True, choices=["mc_dropout"])
     ap.add_argument("--test-source", default="all",
-                    choices=["openmath_tail", "gsm8k", "math", "all"])
+                    choices=["gsm8k", "math", "all"])
     ap.add_argument("--seed", type=int, default=42,
                     help="Training seed — used to locate output_dir_seed{N}/checkpoints/final")
     ap.add_argument("--base-model", default="meta-llama/Llama-3.2-1B-Instruct",
@@ -145,12 +151,8 @@ def main():
                     help="Use step_N checkpoint instead of final (e.g. --checkpoint-step 408000)")
     ap.add_argument("--test-sets-dir", default="",
                     help="Directory for cached test-set JSONLs. Defaults to <data_dir>/../test_sets/")
-    ap.add_argument("--prompt", default="zero_shot", choices=["zero_shot", "cot", "rag"],
-                    help="Prompt style: zero_shot | cot | rag")
-    ap.add_argument("--rag-corpus-dir", default="data/rag_corpus",
-                    help="[rag] Path to the built RAG corpus directory")
-    ap.add_argument("--rag-top-k", type=int, default=3,
-                    help="[rag] Number of examples to retrieve per problem")
+    ap.add_argument("--prompt", default="zero_shot", choices=["zero_shot", "cot"],
+                    help="Prompt style: zero_shot | cot")
     args = ap.parse_args()
 
     # --- Resolve cluster config ---
@@ -169,7 +171,7 @@ def main():
     print(f"HF home : {paths['hf_cache']}")
 
     # --- Test sources ---
-    sources = ["openmath_tail", "gsm8k", "math"] if args.test_source == "all" else [args.test_source]
+    sources = ["gsm8k", "math"] if args.test_source == "all" else [args.test_source]
 
     # --- Checkpoint ---
     if args.checkpoint_step is not None:
@@ -194,20 +196,21 @@ def main():
     elif args.prompt == "cot":
         from src.prompts.cot import build_cot_messages
         prompt_fn = build_cot_messages
-    elif args.prompt == "rag":
-        from src.rag.retriever import Retriever
-        from src.prompts.rag import build_rag_messages
-        retriever = Retriever(args.rag_corpus_dir)
-        prompt_fn = lambda p: build_rag_messages(p, retriever.retrieve(p, top_k=args.rag_top_k))
 
     print(f"Prompt  : {args.prompt}")
 
     # --- Build evaluator once (loaded outside the source loop) ---
     evaluator = _build_mc_dropout_evaluator(args, ckpt_path)
 
+    # --- Embedding similarity model (tiny — load once alongside the LLM) ---
+    from sentence_transformers import SentenceTransformer
+    from src.uq.embedding_similarity import enrich as enrich_similarity
+    print("Loading embedding model for similarity scoring ...")
+    emb_model = SentenceTransformer("all-MiniLM-L6-v2")
+
     # --- Per-source evaluation ---
     from src.uq.test_sets import load_or_build
-    from src.uq.metrics import summarise
+    from src.uq.metrics import summarise, plot_selective_prediction
 
     for source in sources:
         print(f"\n{'='*60}")
@@ -224,9 +227,23 @@ def main():
         print(f"Running {args.method} ({args.num_passes} passes)...")
         results = evaluator.evaluate(problems, prompt_fn=prompt_fn)
 
+        print("Computing embedding similarity ...")
+        results = enrich_similarity(results, problems, emb_model)
+
         summary = summarise(results)
         _write_results(results, summary, out_dir)
-        _plot_all_reliability_diagrams(results, out_dir)
+
+        # confidence/ — general signal quality (not tied to a correctness definition)
+        conf_dir = out_dir / "confidence"
+        conf_dir.mkdir(parents=True, exist_ok=True)
+        plot_selective_prediction(results, str(conf_dir / "selective_prediction.png"))
+        print(f"Selective    → {conf_dir / 'selective_prediction.png'}")
+
+        # binary_correctness/ — reliability + distributions against hardcoded answer match
+        _plot_binary_correctness(results, out_dir / "binary_correctness")
+
+        # embedding_similarity/ — reliability + distributions against similarity rank
+        _plot_embedding_similarity(results, out_dir / "embedding_similarity")
 
         print(f"\n--- Summary: {source} ---")
         for k, v in summary.items():
