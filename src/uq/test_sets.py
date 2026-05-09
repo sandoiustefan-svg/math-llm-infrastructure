@@ -69,7 +69,7 @@ def build_math(out_path: Path, limit: int = 0) -> list[dict]:
     """MATH benchmark test split — competition problems, ~5000 items."""
     from datasets import load_dataset
 
-    ds = load_dataset("hendrycks/competition_math", split="test")
+    ds = load_dataset("lighteval/MATH", "all", split="test")
     records = []
     for ex in ds:
         sol = (ex.get("solution") or "").strip()

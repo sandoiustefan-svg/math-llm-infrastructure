@@ -31,7 +31,7 @@ def inspect_math(limit: int) -> None:
     print("\n" + "=" * 60)
     print("MATH — test split")
     print("=" * 60)
-    ds = load_dataset("hendrycks/competition_math", split="test")
+    ds = load_dataset("lighteval/MATH", "all", split="test")
     print(f"Total problems: {len(ds)}")
     print(f"Fields: {list(ds.features.keys())}\n")
 
