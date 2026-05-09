@@ -133,12 +133,17 @@ the model commits to wrong answers just as confidently as right ones.
 Binary correctness only checks the final answer string. Embedding similarity
 captures whether the reasoning process itself is on the right track.
 
-`all-MiniLM-L6-v2` encodes both the full raw output and the expected answer into
-a 384-dimensional vector. Cosine similarity is computed for all 20 MC Dropout passes.
+`all-MiniLM-L6-v2` encodes both the full raw output and the `reference_solution`
+(complete step-by-step reasoning from the dataset) into a 384-dimensional vector.
+Cosine similarity is computed for all 20 MC Dropout passes.
 
 ```
-sim(raw, expected_answer) = dot(embed(raw), embed(expected_answer))   # L2-normalised
+sim(raw, reference_solution) = dot(embed(raw), embed(reference_solution))   # L2-normalised
 ```
+
+Using the full reference reasoning (not the bare answer string) makes the comparison
+semantically meaningful — a 200-token chain-of-thought is compared against another
+chain-of-thought, not against a single digit like `"18"`.
 
 Four fields per problem in `results.json`:
 

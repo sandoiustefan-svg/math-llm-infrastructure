@@ -166,7 +166,7 @@ answers = [model.generate(input_ids, ...) for _ in range(20)]
 | Key | What it measures |
 |---|---|
 | `correct` | Binary string match on extracted final answer |
-| `mean_raw_similarity` | Mean cosine similarity between raw outputs and expected answer (`all-MiniLM-L6-v2`) |
+| `mean_raw_similarity` | Mean cosine similarity between raw outputs and reference reasoning (`all-MiniLM-L6-v2`) |
 | `similarity_rank` | `low` (< 0.3) / `medium` (0.3–0.7) / `high` (> 0.7) |
 
 **Aggregate metrics (per cell in summary.json)**
@@ -183,25 +183,26 @@ answers = [model.generate(input_ids, ...) for _ in range(20)]
 
 ```bash
 # 1B model — MC Dropout
-bash run_eval_1b.sh [method] [test_source] [prompt] [checkpoint_step] [limit]
+bash run_eval_1b.sh [cluster] [method] [test_source] [prompt] [checkpoint_step] [limit]
 
 # 8B model — MC Dropout
-bash run_eval_8b.sh [method] [test_source] [prompt] [checkpoint_step] [limit]
+bash run_eval_8b.sh [cluster] [method] [test_source] [prompt] [checkpoint_step] [limit]
 ```
 
 | Argument | Options | Default |
 |---|---|---|
+| `cluster` | `fse-4a100-2-1b`, `fse-4a100-2-1b-cot`, `fse-4a100-2-8b` | `fse-4a100-2-1b` / `fse-4a100-2-8b` |
 | `method` | `mc_dropout` | `mc_dropout` |
-| `test_source` | `gsm8k`, `math`, `all` | `gsm8k` |
+| `test_source` | `gsm8k`, `math`, `all` | `all` |
 | `prompt` | `zero_shot`, `cot` | `zero_shot` |
 | `checkpoint_step` | step number or empty (→ `final`) | final |
 | `limit` | max problems per benchmark | 500 |
 
 Examples:
 ```bash
-bash run_eval_1b.sh mc_dropout gsm8k zero_shot 408000 500
-bash run_eval_1b.sh mc_dropout gsm8k cot 408000 500
-bash run_eval_8b.sh mc_dropout all zero_shot    # final checkpoint, GSM8K + MATH
+bash run_eval_1b.sh fse-4a100-2-1b mc_dropout all zero_shot 408000 500
+bash run_eval_1b.sh fse-4a100-2-1b-cot mc_dropout all cot 408000 500
+bash run_eval_8b.sh fse-4a100-2-8b mc_dropout all zero_shot 408000 500
 ```
 
 ### Embedding similarity
@@ -209,6 +210,10 @@ bash run_eval_8b.sh mc_dropout all zero_shot    # final checkpoint, GSM8K + MATH
 Embedding similarity is computed automatically at the end of each evaluation run —
 no separate step needed. `all-MiniLM-L6-v2` is loaded once alongside the LLM and
 scores every problem before `results.json` is written.
+
+Each of the 20 raw chain-of-thought outputs is compared against the full
+`reference_solution` from the dataset (not the bare answer string), so the
+comparison is reasoning-vs-reasoning rather than reasoning-vs-`"18"`.
 
 Fields added to each problem: `raw_similarities`, `mean_raw_similarity`,
 `std_raw_similarity`, `similarity_rank`.
@@ -235,14 +240,14 @@ Both prompt conditions use the same fine-tuned model weights and MC Dropout (N=2
 Each cell is evaluated with two correctness signals applied post-hoc:
 
 1. **Binary** — string match on the extracted final answer (`answers_are_equal`)
-2. **Embedding similarity** — cosine similarity between the full chain-of-thought output and the expected answer (`all-MiniLM-L6-v2`), bucketed into `low` / `medium` / `high` ranks
+2. **Embedding similarity** — cosine similarity between the full chain-of-thought output and the full reference reasoning from the dataset (`all-MiniLM-L6-v2`), bucketed into `low` / `medium` / `high` ranks
 
 ### Test sets
 
 | Test set | Size | Notes |
 |---|---|---|
 | GSM8K test | 1 319 problems | Out-of-distribution — grade-school arithmetic |
-| MATH test | ~5 000 problems | Out-of-distribution — competition mathematics |
+| MATH-Hard test | ~1 324 problems | Out-of-distribution — competition mathematics (levels 3–5) |
 
 ### Research questions
 
@@ -250,7 +255,7 @@ Each cell is evaluated with two correctness signals applied post-hoc:
 2. Does CoT prompting improve the confidence–correctness alignment compared to zero-shot?
 3. Does this effect scale with model size (1B vs 8B)?
 
-Key metrics per cell: accuracy, ECE, AUROC (confidence–correctness discrimination), Spearman correlation, overconfidence rate, and mean embedding similarity.
+Key metrics per cell: accuracy, ECE, AUROC (confidence–correctness discrimination), overconfidence rate, and mean embedding similarity.
 
 ---
 
@@ -287,7 +292,7 @@ results/
     seed42/
       gsm8k/
         zero_shot/
-          results.json           ← per-problem: answers, confidence, correctness, embedding similarity
+          results.json           ← per-problem: problem, expected_answer, reference_solution, answers, confidence, correctness, embedding similarity
           summary.json           ← accuracy, ECE, AUROC, overconf_rate (binary + sim)
           confidence/
             selective_prediction.png
