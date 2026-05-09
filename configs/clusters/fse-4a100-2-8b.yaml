@@ -3,7 +3,8 @@ hardware:
   n_gpus: 1
 
 paths:
-  base_dir:   /home/s5549329/math-llm-infrastructure
-  hf_cache:   /home/s5549329/.cache/huggingface
-  data_dir:   /home/s5549329/math-llm-infrastructure/data/processed/openmathinstruct2/shards
-  output_dir: /home/s5549329/math-llm-infrastructure/outputs/lora_8b
+  base_dir:      /home/s5549329/math-llm-infrastructure
+  hf_cache:      /home/s5549329/.cache/huggingface
+  data_dir:      /home/s5549329/math-llm-infrastructure/data/processed/openmathinstruct2/shards
+  output_dir:    /home/s5549329/math-llm-infrastructure/outputs/lora_8b
+  test_sets_dir: /home/s5549329/math-llm-infrastructure/data/test_sets

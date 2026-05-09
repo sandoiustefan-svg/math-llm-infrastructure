@@ -44,13 +44,15 @@ def _load_cluster_cfg(cluster: str) -> dict:
 def _resolve_paths(cluster_cfg: dict, seed: int) -> dict:
     paths = cluster_cfg["paths"]
     gpus  = cluster_cfg["hardware"]
+    base_dir = paths["base_dir"]
     return {
-        "base_dir":         paths["base_dir"],
+        "base_dir":         base_dir,
         "data_dir":         paths["data_dir"],
-        "base_output_dir":  paths["output_dir"],          # e.g. …/outputs/lora_8b
-        "output_dir":       f"{paths['output_dir']}_seed{seed}",  # e.g. …/outputs/lora_8b_seed42
+        "base_output_dir":  paths["output_dir"],
+        "output_dir":       f"{paths['output_dir']}_seed{seed}",
         "hf_cache":         paths["hf_cache"],
         "cuda_devices":     str(gpus["cuda_devices"]),
+        "test_sets_dir":    paths.get("test_sets_dir", f"{base_dir}/data/test_sets"),
     }
 
 
@@ -181,12 +183,11 @@ def main():
     if not Path(ckpt_path).exists():
         sys.exit(f"Checkpoint not found: {ckpt_path}")
 
-    # Base dir for writing results; test sets sit next to the training data dir
     base_dir = Path(paths["base_dir"])
     test_sets_dir = (
         Path(args.test_sets_dir)
         if args.test_sets_dir
-        else Path(paths["data_dir"]).parent / "test_sets"
+        else Path(paths["test_sets_dir"])
     )
 
     # --- Build prompt function ---
