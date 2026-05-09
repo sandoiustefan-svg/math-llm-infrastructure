@@ -66,10 +66,10 @@ def build_gsm8k(out_path: Path, limit: int = 0) -> list[dict]:
 
 
 def build_math(out_path: Path, limit: int = 0) -> list[dict]:
-    """MATH benchmark test split — competition problems, ~5000 items."""
+    """MATH-Hard benchmark test split — competition problems levels 3-5, ~1324 items."""
     from datasets import load_dataset
 
-    ds = load_dataset("lighteval/MATH", "all", split="test")
+    ds = load_dataset("lighteval/MATH-Hard", split="test")
     records = []
     for ex in ds:
         sol = (ex.get("solution") or "").strip()
@@ -81,7 +81,7 @@ def build_math(out_path: Path, limit: int = 0) -> list[dict]:
         records.append({
             "problem": problem,
             "expected_answer": answer,
-            "reference_solution": sol,  # full LaTeX solution for embedding similarity
+            "reference_solution": sol,
         })
         if limit and len(records) >= limit:
             break
