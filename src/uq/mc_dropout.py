@@ -9,7 +9,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
 import math
-from src.uq.metrics import answer_entropy, answers_are_equal, token_probability_confidence
+from src.uq.metrics import answer_entropy, answers_are_equal, normalize_math_answer, token_probability_confidence
 from src.prompts.zero_shot import build_zero_shot_messages
 
 
@@ -122,7 +122,8 @@ class MCDropoutEvaluator:
             for _ in range(self.cfg.num_passes):
                 raw = self._generate_once(input_ids)
                 raws.append(raw)
-                answers.append(self._extract_final_answer(raw))
+                # Normalize before counting so "2" and "\boxed{2}" vote together.
+                answers.append(normalize_math_answer(self._extract_final_answer(raw)))
 
             counts: dict[str, int] = {}
             for a in answers:
