@@ -51,7 +51,13 @@ def build_gsm8k(out_path: Path, limit: int = 0) -> list[dict]:
             continue
         problem = ex["question"].strip()
         answer = m.group(1).replace(",", "").strip()
-        records.append({"problem": problem, "expected_answer": answer})
+        # full reasoning used for embedding similarity
+        reference_solution = ex["answer"].strip()
+        records.append({
+            "problem": problem,
+            "expected_answer": answer,
+            "reference_solution": reference_solution,
+        })
         if limit and len(records) >= limit:
             break
 
@@ -63,16 +69,20 @@ def build_math(out_path: Path, limit: int = 0) -> list[dict]:
     """MATH benchmark test split — competition problems, ~5000 items."""
     from datasets import load_dataset
 
-    ds = load_dataset("hendrycks/competition_math", split="test", trust_remote_code=True)
+    ds = load_dataset("hendrycks/competition_math", split="test")
     records = []
     for ex in ds:
-        sol = ex.get("solution") or ""
+        sol = (ex.get("solution") or "").strip()
         m = re.search(r"\\boxed\{([^}]+)\}", sol)
         if not m:
             continue
         problem = (ex.get("problem") or "").strip()
         answer = m.group(1).strip()
-        records.append({"problem": problem, "expected_answer": answer})
+        records.append({
+            "problem": problem,
+            "expected_answer": answer,
+            "reference_solution": sol,  # full LaTeX solution for embedding similarity
+        })
         if limit and len(records) >= limit:
             break
 

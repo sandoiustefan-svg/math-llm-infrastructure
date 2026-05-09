@@ -39,7 +39,13 @@ def enrich(results: list[dict], problems: list[dict], model) -> list[dict]:
         std_raw_similarity  : float        std across passes
         similarity_rank     : str          "low" / "medium" / "high"
     """
-    expected = [p.get("expected_answer", "") for p in problems]
+    # Use full reference solution for embedding if available, else fall back to
+    # expected_answer. This gives a fair semantic comparison: model CoT vs
+    # dataset CoT, rather than model CoT vs a bare answer string.
+    expected = [
+        p.get("reference_solution") or p.get("expected_answer", "")
+        for p in problems
+    ]
 
     unique_answers = list(dict.fromkeys(expected))
     answer_to_idx  = {a: i for i, a in enumerate(unique_answers)}
