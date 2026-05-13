@@ -25,6 +25,7 @@ runs/
 # Environemnt
 .venv/
 venv/
+.env
 
 # Logs
 logs/
@@ -42,5 +43,7 @@ huggingface/
 __pycache__/
 *.pyc
 
+# results
 
+results/
 

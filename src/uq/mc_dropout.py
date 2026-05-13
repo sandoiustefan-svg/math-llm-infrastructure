@@ -9,8 +9,28 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
 import math
-from src.uq.metrics import answer_entropy, answers_are_equal, normalize_math_answer, token_probability_confidence
+from src.uq.metrics import (
+    answer_entropy, answers_are_equal, normalize_math_answer,
+    token_probability_confidence, arithmetic_step_correctness,
+)
 from src.prompts.zero_shot import build_zero_shot_messages
+
+
+def _avg_arith(raws: list[str]) -> dict:
+    """Average arithmetic step correctness across all MC Dropout passes."""
+    scores = [arithmetic_step_correctness(r) for r in raws]
+    valid  = [s for s in scores if not math.isnan(s["arith_step_score"])]
+    if not valid:
+        return {
+            "arith_step_score":    float("nan"),
+            "arith_steps_total":   0,
+            "arith_steps_correct": 0,
+        }
+    return {
+        "arith_step_score":    round(sum(s["arith_step_score"]    for s in valid) / len(valid), 4),
+        "arith_steps_total":   round(sum(s["arith_steps_total"]   for s in valid) / len(valid)),
+        "arith_steps_correct": round(sum(s["arith_steps_correct"] for s in valid) / len(valid)),
+    }
 
 
 
@@ -177,9 +197,11 @@ class MCDropoutEvaluator:
                 "numeric_span_perplexity":       _avg("numeric_span_perplexity"),
                 "numeric_span_min_token_prob":   _avg("numeric_span_min_token_prob"),
                 "numeric_span_std_token_prob":   _avg("numeric_span_std_token_prob"),
-                # Position-weighted token probability (Metric 6)
+                # Position-weighted token probability
                 "weighted_mean_confidence":      _avg("weighted_mean_confidence"),
                 "weighted_perplexity":           _avg("weighted_perplexity"),
+                # Arithmetic step correctness — averaged across all passes
+                **_avg_arith(raws),
             })
 
         return results

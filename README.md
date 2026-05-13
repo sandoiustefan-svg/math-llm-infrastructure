@@ -1,6 +1,10 @@
 # math-llm-infrastructure
 
-LLaMA LoRA fine-tuning infrastructure for OpenMathInstruct-2, with Uncertainty Quantification (MC Dropout) evaluated via zero-shot and chain-of-thought prompting.
+LLaMA LoRA fine-tuning infrastructure for OpenMathInstruct-2, with Uncertainty Quantification (MC Dropout) evaluated via three prompt variants across two model sizes and two test sets.
+
+The core research question: **does structured prompting improve the alignment between a model's confidence and the correctness of its outputs?**
+
+Correctness is measured by four complementary signals: binary answer match, embedding similarity (baseline), arithmetic step correctness (`<<expr=result>>` annotations), and LLM-as-judge rank (`good / medium / bad`). See `docs/metrics.md` and `docs/plots.md`.
 
 ---
 
@@ -139,15 +143,13 @@ logging:
 
 ### Method — MC Dropout
 
-LoRA dropout (`p=0.05`) is active on all adapter layers during both training and inference. At inference time, `model.train()` keeps dropout active; running the same problem through the model **N=20 times** yields a distribution over answers.
-
-No additional dropout hook is needed — the LoRA adapter dropout is the stochasticity source.
+LoRA dropout (`lora_dropout=0.1`) is active on all adapter layers during training and reactivated at inference time via `model.train()`. An additional `nn.Dropout` hook is inserted after the final RMSNorm layer (`_add_mc_dropout_hook()`). Running the same problem **N=20 times** with active dropout yields a distribution over answers — disagreement estimates epistemic uncertainty.
 
 ```python
 # Inference recipe (handled automatically by run_uq_eval.py)
 model = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype=torch.bfloat16)
 model = PeftModel.from_pretrained(model, checkpoint_path, is_trainable=False)
-model.train()   # activates LoRA dropout
+model.train()   # re-activates LoRA dropout
 
 answers = [model.generate(input_ids, ...) for _ in range(20)]
 ```
@@ -158,104 +160,140 @@ answers = [model.generate(input_ids, ...) for _ in range(20)]
 
 | Key | What it measures |
 |---|---|
-| `confidence` | Majority-vote fraction across 20 passes — answer-level |
-| `weighted_mean_confidence` | Weighted geometric mean token prob (numeric answer-span tokens = 25×) — token-level |
+| `confidence` | Majority-vote fraction across 20 passes — answer-level signal |
+| `weighted_mean_confidence` | Weighted geometric mean token prob — `<<expr=result>>` result tokens at 10×, Final Answer span at 25× |
 
-**Correctness signals (2 per problem)**
+**Correctness signals (4 per problem)**
 
 | Key | What it measures |
 |---|---|
 | `correct` | Binary string match on extracted final answer |
-| `mean_raw_similarity` | Mean cosine similarity between raw outputs and reference reasoning (`all-MiniLM-L6-v2`) |
-| `similarity_rank` | `low` (< 0.3) / `medium` (0.3–0.7) / `high` (> 0.7) |
+| `mean_raw_similarity` | Mean cosine similarity vs `reference_solution` (`all-MiniLM-L6-v2`) — baseline, known weak signal |
+| `arith_step_score` | Fraction of `<<expr=result>>` annotations where `eval(expr) ≈ result` — internal consistency |
+| `judge_rank` | `good / medium / bad` from LLM judge — produced by `src/uq/llm_judge.py` post-inference |
 
 **Aggregate metrics (per cell in summary.json)**
 
 | Metric | Meaning |
 |---|---|
-| `ece_*` | Expected Calibration Error — does confidence=0.8 mean 80% accuracy? |
-| `auroc_*` | AUROC — does higher confidence rank correct problems above incorrect ones? |
-| `ece_sim_*` | ECE against mean embedding similarity instead of binary accuracy |
-| `auroc_sim_*` | AUROC with high similarity rank as positive class |
+| `ece_confidence`, `ece_weighted` | ECE against binary correctness |
+| `ece_arith_*` | ECE against arithmetic step score |
+| `ece_judge_*` | ECE against judge score (good=1, medium=0.5, bad=0) |
+| `ece_sim_*` | ECE against embedding similarity (baseline) |
+| `auroc_confidence`, `auroc_weighted` | AUROC — binary correct vs wrong |
+| `auroc_arith_*` | AUROC — arith step score ≥ 0.8 vs lower |
+| `auroc_judge_*` | AUROC — judge `good` vs `medium+bad` |
 | `overconf_rate` | Fraction of high-confidence (≥ 0.8) predictions that are wrong |
 
 ### Evaluation scripts
 
 ```bash
-# 1B model — MC Dropout
-bash run_eval_1b.sh [cluster] [method] [test_source] [prompt] [checkpoint_step] [limit]
+# Run inference + all metrics for one prompt variant
+python scripts/python/run_uq_eval.py \
+    --cluster macross \
+    --method mc_dropout \
+    --test-source all \
+    --prompt zero_shot \
+    --seed 42
 
-# 8B model — MC Dropout
-bash run_eval_8b.sh [cluster] [method] [test_source] [prompt] [checkpoint_step] [limit]
-```
+# Available prompts: zero_shot | cot | cot_step_by_step
+# Available test sources: gsm8k | math | all
 
-| Argument | Options | Default |
-|---|---|---|
-| `cluster` | `fse-4a100-2-1b`, `fse-4a100-2-1b-cot`, `fse-4a100-2-8b` | `fse-4a100-2-1b` / `fse-4a100-2-8b` |
-| `method` | `mc_dropout` | `mc_dropout` |
-| `test_source` | `gsm8k`, `math`, `all` | `all` |
-| `prompt` | `zero_shot`, `cot` | `zero_shot` |
-| `checkpoint_step` | step number or empty (→ `final`) | final |
-| `limit` | max problems per benchmark | 500 |
+# Optional: add reference alignment scoring (GSM8K only)
+python scripts/python/run_uq_eval.py --cluster macross --method mc_dropout \
+    --test-source gsm8k --prompt cot --reference-alignment
 
-Examples:
-```bash
-bash run_eval_1b.sh fse-4a100-2-1b mc_dropout all zero_shot 408000 500
-bash run_eval_1b.sh fse-4a100-2-1b-cot mc_dropout all cot 408000 500
-bash run_eval_8b.sh fse-4a100-2-8b mc_dropout all zero_shot 408000 500
+# Post-inference: LLM judge labelling (requires .env with API key)
+python -m src.uq.llm_judge \
+    --results results/mc_dropout/seed42/gsm8k/cot/results.json \
+    --model gpt-4o-mini
+
+# Preview rendered prompts before running inference
+python scripts/python/show_prompts.py --source gsm8k --n 5 --print
 ```
 
 ### Embedding similarity
 
-Embedding similarity is computed automatically at the end of each evaluation run —
-no separate step needed. `all-MiniLM-L6-v2` is loaded once alongside the LLM and
-scores every problem before `results.json` is written.
+Computed automatically during inference — no separate step needed. `all-MiniLM-L6-v2`
+is loaded once alongside the LLM and scores every problem before `results.json` is written.
+Each of the 20 raw outputs is compared against the full `reference_solution`.
 
-Each of the 20 raw chain-of-thought outputs is compared against the full
-`reference_solution` from the dataset (not the bare answer string), so the
-comparison is reasoning-vs-reasoning rather than reasoning-vs-`"18"`.
+Fields: `raw_similarities`, `mean_raw_similarity`, `std_raw_similarity`, `similarity_rank`.
 
-Fields added to each problem: `raw_similarities`, `mean_raw_similarity`,
-`std_raw_similarity`, `similarity_rank`.
+**Note:** embedding similarity is a known weak signal for mathematical text and is retained
+as a baseline. The primary correctness signals are binary correctness and arithmetic step score.
+
+### Arithmetic step correctness
+
+All three prompts instruct the model to annotate every arithmetic operation as
+`<<expr=result>>` (e.g. `48/2 = <<48/2=24>>24`). After inference, each annotation is
+verified by `eval(expr) ≈ result`. This measures whether the model's stated arithmetic
+is internally self-consistent, independent of the reference solution.
+
+Optionally, `--reference-alignment` compares the model's `<<>>` result values against
+those in the ground truth (GSM8K only), measuring whether the model follows the correct
+reasoning path.
+
+### LLM-as-judge
+
+After `results.json` is written, run `src/uq/llm_judge.py` to label each problem
+`good / medium / bad` using an external LLM judge (default: `gpt-4o-mini`). Labels are
+stored in `results_judged.json`; plots go to `judge_correctness/`.
+
+Cost for the full experiment (6 000 majority-answer judgments): ~$0.90 with GPT-4o-mini.
+Requires `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` in `.env` (copy from `.env.example`).
 
 ---
 
-## Experiment Design — 2×2
+## Experiment Design — 2×3
 
-The main experimental comparison is a **2×2 factorial design** across model size and prompt style:
+The main experimental comparison is a **2×3 factorial design** across model size and prompt variant:
 
-|  | Zero-shot | Few-shot CoT |
+|  | Zero-shot | Few-shot (CoT) | Few-shot + Step-by-step |
+|---|---|---|---|
+| **1B LoRA rank 16** | accuracy + UQ | accuracy + UQ | accuracy + UQ |
+| **8B LoRA rank 64** | accuracy + UQ | accuracy + UQ | accuracy + UQ |
+
+Each cell runs on two test sets: **GSM8K** (in-distribution) and **MATH** (out-of-distribution).
+All three prompt variants instruct the model to annotate arithmetic as `<<expr=result>>`,
+enabling uniform metric computation across all cells. See `docs/prompts.md` for full prompt
+definitions and `docs/uncertainty_methods.md` for the MC Dropout setup.
+
+### Prompt variants
+
+| Variant | Key | Description |
 |---|---|---|
-| **1B LoRA rank 16** | accuracy + UQ | accuracy + UQ |
-| **8B LoRA rank 64** | accuracy + UQ | accuracy + UQ |
+| Zero-shot | `zero_shot` | System prompt only; `<<expr=result>>` instruction in system message |
+| Few-shot CoT | `cot` | System prompt + 3 hand-written examples in natural prose |
+| Few-shot + Step-by-step | `cot_step_by_step` | Same examples with explicit `Step N:` labels |
 
-**Zero-shot**: the model is given only the problem and asked to solve it directly.
+### Correctness signals
 
-**Few-shot CoT (chain-of-thought)**: the prompt includes 3 hand-written worked examples demonstrating step-by-step reasoning. Fixed — the same examples are used for every test problem.
+All four signals are computed for every cell:
 
-Both prompt conditions use the same fine-tuned model weights and MC Dropout (N=20 stochastic passes with LoRA dropout active).
-
-### Correctness evaluation
-
-Each cell is evaluated with two correctness signals applied post-hoc:
-
-1. **Binary** — string match on the extracted final answer (`answers_are_equal`)
-2. **Embedding similarity** — cosine similarity between the full chain-of-thought output and the full reference reasoning from the dataset (`all-MiniLM-L6-v2`), bucketed into `low` / `medium` / `high` ranks
+1. **Binary** — string match on extracted final answer (`answers_are_equal`)
+2. **Embedding similarity** — cosine similarity vs `reference_solution` (baseline)
+3. **Arithmetic step score** — fraction of `<<expr=result>>` annotations that are correct
+4. **LLM judge rank** — `good / medium / bad` from external judge (post-inference step)
 
 ### Test sets
 
-| Test set | Size | Notes |
+| Test set | Size | Distribution |
 |---|---|---|
-| GSM8K test | 1 319 problems | Out-of-distribution — grade-school arithmetic |
-| MATH-Hard test | ~1 324 problems | Out-of-distribution — competition mathematics (levels 3–5) |
+| GSM8K | 500 problems (sampled) | In-distribution — models fine-tuned on OpenMathInstruct-2 which derives from GSM8K |
+| MATH | 500 problems (sampled) | Out-of-distribution — competition mathematics |
 
 ### Research questions
 
-1. How well does model confidence correlate with correctness (binary and embedding similarity)?
-2. Does CoT prompting improve the confidence–correctness alignment compared to zero-shot?
-3. Does this effect scale with model size (1B vs 8B)?
+1. How well does model confidence align with correctness across all four signals?
+2. Does structured prompting (CoT → step-by-step) improve confidence–correctness alignment?
+3. Does the `<<expr=result>>` annotation format produce better-calibrated confidence (lower ECE-arith) than embedding similarity?
+4. Does the effect of prompting scale with model size (1B vs 8B)?
+5. How does calibration degrade from in-distribution (GSM8K) to OOD (MATH)?
 
-Key metrics per cell: accuracy, ECE, AUROC (confidence–correctness discrimination), overconfidence rate, and mean embedding similarity.
+Key metrics per cell: accuracy, ECE, AUROC, overconfidence rate — computed against all four
+correctness signals. See `docs/metrics.md` for definitions and `docs/plots.md` for plot
+interpretation.
 
 ---
 
@@ -292,18 +330,32 @@ results/
     seed42/
       gsm8k/
         zero_shot/
-          results.json           ← per-problem: problem, expected_answer, reference_solution, answers, confidence, correctness, embedding similarity
-          summary.json           ← accuracy, ECE, AUROC, overconf_rate (binary + sim)
+          results.json             ← per-problem: answers, confidence, correctness, arith scores, similarities
+          summary.json             ← accuracy, ECE, AUROC, overconf_rate for all signals
+          results_judged.json      ← results.json + judge_rank/judge_score (after llm_judge.py)
+          summary_judged.json      ← summary.json + ece_judge_*, auroc_judge_*
           confidence/
             selective_prediction.png
           binary_correctness/
             reliability_confidence.png
             reliability_weighted_mean_confidence.png
+            roc_binary.png
           embedding_similarity/
             reliability_sim_confidence.png
             reliability_sim_weighted_mean_confidence.png
+            roc_sim.png
+          arithmetic_correctness/
+            reliability_arith_confidence.png
+            reliability_arith_weighted_mean_confidence.png
+            roc_arith.png
+          judge_correctness/       ← produced by src/uq/llm_judge.py
+            reliability_judge_confidence.png
+            reliability_judge_weighted_mean_confidence.png
+            roc_judge.png
         cot/
           ...
+        cot_step_by_step/
+          ...
       math/
-        zero_shot/ cot/
+        zero_shot/ cot/ cot_step_by_step/
 ```

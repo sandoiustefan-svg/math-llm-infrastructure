@@ -81,21 +81,58 @@ _CONF_KEYS = [
 
 
 def _plot_binary_correctness(results: list[dict], out_dir: Path) -> None:
-    from src.uq.metrics import plot_reliability_diagram
+    from src.uq.metrics import plot_reliability_diagram, plot_roc_curve
     out_dir.mkdir(parents=True, exist_ok=True)
     for key, title in _CONF_KEYS:
         p = str(out_dir / f"reliability_{key}.png")
         plot_reliability_diagram(results, p, confidence_key=key, title=title)
-        print(f"Reliability      → {p}")
+        print(f"Reliability       → {p}")
+    p = str(out_dir / "roc_binary.png")
+    plot_roc_curve(
+        results, p,
+        label_fn=lambda r: r.get("correct"),
+        title="ROC Curve — Binary Correctness",
+    )
+    print(f"ROC (binary)      → {p}")
 
 
 def _plot_embedding_similarity(results: list[dict], out_dir: Path) -> None:
-    from src.uq.metrics import plot_reliability_diagram_sim
+    from src.uq.metrics import plot_reliability_diagram_sim, plot_roc_curve
     out_dir.mkdir(parents=True, exist_ok=True)
     for key, title in _CONF_KEYS:
         p = str(out_dir / f"reliability_sim_{key}.png")
         plot_reliability_diagram_sim(results, p, confidence_key=key, title=title)
-        print(f"Reliability-sim  → {p}")
+        print(f"Reliability-sim   → {p}")
+    p = str(out_dir / "roc_sim.png")
+    plot_roc_curve(
+        results, p,
+        label_fn=lambda r: (True if r.get("similarity_rank") == "high"
+                            else False if r.get("similarity_rank") in ("low", "medium")
+                            else None),
+        title="ROC Curve — Embedding Similarity (high vs low+medium)",
+    )
+    print(f"ROC (sim)         → {p}")
+
+
+def _plot_arithmetic_correctness(results: list[dict], out_dir: Path) -> None:
+    from src.uq.metrics import plot_reliability_diagram_arith, plot_roc_curve
+    import math
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for key, title in _CONF_KEYS:
+        p = str(out_dir / f"reliability_arith_{key}.png")
+        plot_reliability_diagram_arith(results, p, confidence_key=key, title=title)
+        print(f"Reliability-arith → {p}")
+    p = str(out_dir / "roc_arith.png")
+    plot_roc_curve(
+        results, p,
+        label_fn=lambda r: (
+            r.get("arith_step_score", float("nan")) >= 0.8
+            if not math.isnan(r.get("arith_step_score", float("nan")))
+            else None
+        ),
+        title="ROC Curve — Arithmetic Step Correctness (score ≥ 0.8)",
+    )
+    print(f"ROC (arith)       → {p}")
 
 
 # ---------------------------------------------------------------------------
@@ -153,8 +190,12 @@ def main():
                     help="Use step_N checkpoint instead of final (e.g. --checkpoint-step 408000)")
     ap.add_argument("--test-sets-dir", default="",
                     help="Directory for cached test-set JSONLs. Defaults to <data_dir>/../test_sets/")
-    ap.add_argument("--prompt", default="zero_shot", choices=["zero_shot", "cot"],
-                    help="Prompt style: zero_shot | cot")
+    ap.add_argument("--prompt", default="zero_shot",
+                    choices=["zero_shot", "cot", "cot_step_by_step"],
+                    help="Prompt style: zero_shot | cot | cot_step_by_step")
+    ap.add_argument("--reference-alignment", action="store_true", default=False,
+                    help="Enrich results with reference alignment score (GSM8K only; "
+                         "requires <<expr=result>> annotations in reference_solution)")
     args = ap.parse_args()
 
     # --- Resolve cluster config ---
@@ -191,12 +232,8 @@ def main():
     )
 
     # --- Build prompt function ---
-    if args.prompt == "zero_shot":
-        from src.prompts.zero_shot import build_zero_shot_messages
-        prompt_fn = build_zero_shot_messages
-    elif args.prompt == "cot":
-        from src.prompts.cot import build_cot_messages
-        prompt_fn = build_cot_messages
+    from src.prompts import PROMPT_BUILDERS
+    prompt_fn = PROMPT_BUILDERS[args.prompt]
 
     print(f"Prompt  : {args.prompt}")
 
@@ -231,6 +268,14 @@ def main():
         print("Computing embedding similarity ...")
         results = enrich_similarity(results, problems, emb_model)
 
+        if args.reference_alignment:
+            from src.uq.metrics import reference_alignment as _ref_align
+            print("Computing reference alignment ...")
+            problem_map = {p["problem"]: p for p in problems}
+            for r in results:
+                ref_sol = problem_map.get(r["problem"], {}).get("reference_solution", "")
+                r.update(_ref_align(r.get("raws", [""])[0], ref_sol or ""))
+
         summary = summarise(results)
         _write_results(results, summary, out_dir)
 
@@ -240,11 +285,14 @@ def main():
         plot_selective_prediction(results, str(conf_dir / "selective_prediction.png"))
         print(f"Selective    → {conf_dir / 'selective_prediction.png'}")
 
-        # binary_correctness/ — reliability + distributions against hardcoded answer match
+        # binary_correctness/ — reliability diagrams against exact answer match
         _plot_binary_correctness(results, out_dir / "binary_correctness")
 
-        # embedding_similarity/ — reliability + distributions against similarity rank
+        # embedding_similarity/ — reliability diagrams against embedding similarity
         _plot_embedding_similarity(results, out_dir / "embedding_similarity")
+
+        # arithmetic_correctness/ — reliability diagrams against arith step score
+        _plot_arithmetic_correctness(results, out_dir / "arithmetic_correctness")
 
         print(f"\n--- Summary: {source} ---")
         for k, v in summary.items():

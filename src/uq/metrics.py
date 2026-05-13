@@ -18,20 +18,22 @@ if TYPE_CHECKING:
 
 _DIGIT_CHARS = set("0123456789")
 _ANSWER_MARKER = "Final Answer:"
-_RANK_INT = {"low": 0, "medium": 1, "high": 2}  # ordinal encoding for similarity ranks
+_RANK_INT   = {"low": 0, "medium": 1, "high": 2}   # ordinal encoding for similarity ranks
+_JUDGE_SCORE = {"good": 1.0, "medium": 0.5, "bad": 0.0}  # numeric encoding for judge labels
 
-# Weights for Metric 6 (position-weighted token probability).
-# Tokens are assigned a weight based on their region:
-#   - Glue tokens (non-numeric, reasoning chain): 1
-#   - Numeric tokens in reasoning chain:          _W_NUMERIC
-#   - Non-numeric tokens in answer span:          _W_SPAN
-#   - Numeric tokens in answer span:              _W_NUMERIC * _W_SPAN
-# Choice of 5 is principled: numeric tokens carry ~5× the mathematical information
-# of glue tokens; answer-span tokens are ~5× more predictive of final correctness
-# than mid-chain tokens. The product (25) for numeric-span tokens reflects both
-# properties simultaneously. These are fixed constants, not tuned hyperparameters.
-_W_NUMERIC = 5
-_W_SPAN    = 5
+# Weights for the weighted geometric mean confidence.
+# All prompts use <<expr=result>> annotations, so arithmetic-critical tokens are
+# explicitly identifiable rather than heuristically detected:
+#   - Result tokens inside <<expr=result>>: _W_ARITH_RESULT
+#   - Tokens in Final Answer span:          _W_FINAL_ANSWER
+#   - All other tokens:                     1
+_W_ARITH_RESULT  = 10
+_W_FINAL_ANSWER  = 25
+
+# Matches <<expr=result>> annotations; group 1 = expr, group 2 = result portion.
+_ARITH_ANNOTATION = re.compile(r'<<([^=\n]+)=([^>\n]+)>>')
+# Allowed characters in a safe arithmetic expression.
+_SAFE_EXPR_RE     = re.compile(r'[^0-9+\-*/().\s]')
 
 
 # ---------------------------------------------------------------------------
@@ -257,19 +259,29 @@ def token_probability_confidence(
     ]
     numeric_span_metrics = _compute_confidence_from_probs(numeric_span_probs)
 
-    # --- 6. Position-weighted token probability (Metric 6) ---
-    # Each token gets a weight based on its region (see _W_NUMERIC / _W_SPAN constants).
-    # Numeric tokens in the answer span receive the highest weight (_W_NUMERIC * _W_SPAN).
-    weights = []
+    # Weighted geometric mean: result tokens inside <<expr=result>> get _W_ARITH_RESULT×,
+    # tokens in the Final Answer span get _W_FINAL_ANSWER×, all others get 1×.
+    # Build a char→token index map so we can identify result-span tokens by regex.
+    char_to_token: list[int] = []
+    reconstructed = ""
     for idx, tok_id in enumerate(token_ids_list):
-        is_numeric = _is_numeric_token(tokenizer.decode([tok_id]))
-        in_span    = span_start is not None and idx >= span_start
-        if in_span and is_numeric:
-            weights.append(_W_NUMERIC * _W_SPAN)
-        elif in_span:
-            weights.append(_W_SPAN)
-        elif is_numeric:
-            weights.append(_W_NUMERIC)
+        tok_str = tokenizer.decode([tok_id])
+        char_to_token.extend([idx] * len(tok_str))
+        reconstructed += tok_str
+
+    arith_token_set: set[int] = set()
+    for m in _ARITH_ANNOTATION.finditer(reconstructed):
+        for ci in range(m.start(2), min(m.end(2), len(char_to_token))):
+            arith_token_set.add(char_to_token[ci])
+
+    weights = []
+    for idx in range(len(token_ids_list)):
+        in_span  = span_start is not None and idx >= span_start
+        in_arith = idx in arith_token_set
+        if in_span:
+            weights.append(_W_FINAL_ANSWER)
+        elif in_arith:
+            weights.append(_W_ARITH_RESULT)
         else:
             weights.append(1)
     weighted_metrics = _weighted_geometric_mean(token_probs, weights)
@@ -452,6 +464,223 @@ def auroc_sim(results: list[dict], confidence_key: str = "confidence") -> float:
     return round(auc, 4)
 
 
+def auroc_arith(
+    results: list[dict],
+    confidence_key: str = "confidence",
+    threshold: float = 0.8,
+) -> float:
+    """AUROC where arith_step_score >= threshold is the positive class."""
+    labeled = [
+        (float(r[confidence_key]), int(r.get("arith_step_score", float("nan")) >= threshold))
+        for r in results
+        if not math.isnan(r.get("arith_step_score", float("nan")))
+        and confidence_key in r
+        and not math.isnan(float(r[confidence_key]))
+    ]
+    if not labeled:
+        return float("nan")
+    n_pos = sum(c for _, c in labeled)
+    n_neg = len(labeled) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    labeled.sort(key=lambda x: -x[0])
+    tp = fp = 0
+    prev_tpr = prev_fpr = 0.0
+    auc = 0.0
+    for _, pos in labeled:
+        if pos:
+            tp += 1
+        else:
+            fp += 1
+        tpr = tp / n_pos
+        fpr = fp / n_neg
+        auc += (fpr - prev_fpr) * (tpr + prev_tpr) / 2
+        prev_tpr, prev_fpr = tpr, fpr
+    return round(auc, 4)
+
+
+def auroc_judge(results: list[dict], confidence_key: str = "confidence") -> float:
+    """AUROC using judge_rank == 'good' as the positive class (vs medium + bad)."""
+    labeled = [
+        (float(r[confidence_key]), int(r.get("judge_rank") == "good"))
+        for r in results
+        if r.get("judge_rank") in _JUDGE_SCORE
+        and confidence_key in r
+        and not math.isnan(float(r[confidence_key]))
+    ]
+    if not labeled:
+        return float("nan")
+    n_pos = sum(c for _, c in labeled)
+    n_neg = len(labeled) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    labeled.sort(key=lambda x: -x[0])
+    tp = fp = 0
+    prev_tpr = prev_fpr = 0.0
+    auc = 0.0
+    for _, pos in labeled:
+        if pos:
+            tp += 1
+        else:
+            fp += 1
+        tpr = tp / n_pos
+        fpr = fp / n_neg
+        auc += (fpr - prev_fpr) * (tpr + prev_tpr) / 2
+        prev_tpr, prev_fpr = tpr, fpr
+    return round(auc, 4)
+
+
+def expected_calibration_error_judge(
+    results: list[dict],
+    n_bins: int = 10,
+    confidence_key: str = "confidence",
+) -> float:
+    """ECE-style calibration against judge score (good=1.0, medium=0.5, bad=0.0)."""
+    labeled = [
+        r for r in results
+        if r.get("judge_rank") in _JUDGE_SCORE
+        and confidence_key in r
+        and not math.isnan(float(r[confidence_key]))
+    ]
+    if not labeled:
+        return float("nan")
+
+    bins: list[list] = [[] for _ in range(n_bins)]
+    for r in labeled:
+        idx = min(int(float(r[confidence_key]) * n_bins), n_bins - 1)
+        bins[idx].append(r)
+
+    ece = 0.0
+    for b in bins:
+        if not b:
+            continue
+        mean_score = sum(_JUDGE_SCORE[r["judge_rank"]] for r in b) / len(b)
+        mean_conf  = sum(float(r[confidence_key]) for r in b) / len(b)
+        ece += (len(b) / len(labeled)) * abs(mean_score - mean_conf)
+    return round(ece, 4)
+
+
+def plot_reliability_diagram_judge(
+    results: list[dict],
+    output_path: str,
+    n_bins: int = 10,
+    confidence_key: str = "confidence",
+    title: str | None = None,
+) -> None:
+    """Reliability diagram where y-axis shows mean judge score (good=1, medium=0.5, bad=0) per bin."""
+    labeled = [
+        r for r in results
+        if r.get("judge_rank") in _JUDGE_SCORE
+        and confidence_key in r
+        and not math.isnan(float(r[confidence_key]))
+    ]
+    if not labeled:
+        return
+
+    bin_scores, bin_confs = [], []
+    for i in range(n_bins):
+        lo, hi = i / n_bins, (i + 1) / n_bins
+        b = [r for r in labeled if lo <= float(r[confidence_key]) < hi]
+        if not b:
+            continue
+        bin_scores.append(sum(_JUDGE_SCORE[r["judge_rank"]] for r in b) / len(b))
+        bin_confs.append(sum(float(r[confidence_key]) for r in b) / len(b))
+
+    ece_judge = expected_calibration_error_judge(results, n_bins, confidence_key)
+    label = title or confidence_key.replace("_", " ").title()
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.bar(bin_confs, bin_scores, width=1 / n_bins, align="center", alpha=0.7,
+           color="steelblue", label="Mean judge score")
+    ax.plot([0, 1], [0, 1], "k--", linewidth=1, label="Perfect calibration")
+    ax.set_xlabel("Confidence")
+    ax.set_ylabel("Mean judge score  (good=1, medium=0.5, bad=0)")
+    ax.set_title(f"{label}  (ECE-judge = {ece_judge:.3f})")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def expected_calibration_error_arith(
+    results: list[dict],
+    n_bins: int = 10,
+    confidence_key: str = "confidence",
+) -> float:
+    """ECE-style calibration against arith_step_score instead of binary accuracy."""
+    labeled = [
+        r for r in results
+        if not math.isnan(r.get("arith_step_score", float("nan")))
+        and confidence_key in r
+        and not math.isnan(float(r[confidence_key]))
+    ]
+    if not labeled:
+        return float("nan")
+
+    bins: list[list] = [[] for _ in range(n_bins)]
+    for r in labeled:
+        idx = min(int(float(r[confidence_key]) * n_bins), n_bins - 1)
+        bins[idx].append(r)
+
+    ece = 0.0
+    for b in bins:
+        if not b:
+            continue
+        mean_arith = sum(r["arith_step_score"] for r in b) / len(b)
+        mean_conf  = sum(float(r[confidence_key]) for r in b) / len(b)
+        ece += (len(b) / len(labeled)) * abs(mean_arith - mean_conf)
+    return round(ece, 4)
+
+
+def plot_reliability_diagram_arith(
+    results: list[dict],
+    output_path: str,
+    n_bins: int = 10,
+    confidence_key: str = "confidence",
+    title: str | None = None,
+) -> None:
+    """
+    Reliability diagram where the y-axis shows mean arithmetic step score per bin.
+    Answers: does higher confidence correspond to more arithmetically correct intermediate steps?
+    """
+    labeled = [
+        r for r in results
+        if not math.isnan(r.get("arith_step_score", float("nan")))
+        and confidence_key in r
+        and not math.isnan(float(r[confidence_key]))
+    ]
+    if not labeled:
+        return
+
+    bin_scores, bin_confs = [], []
+    for i in range(n_bins):
+        lo, hi = i / n_bins, (i + 1) / n_bins
+        b = [r for r in labeled if lo <= float(r[confidence_key]) < hi]
+        if not b:
+            continue
+        bin_scores.append(sum(r["arith_step_score"] for r in b) / len(b))
+        bin_confs.append(sum(float(r[confidence_key]) for r in b) / len(b))
+
+    ece_arith = expected_calibration_error_arith(results, n_bins, confidence_key)
+    label = title or confidence_key.replace("_", " ").title()
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.bar(bin_confs, bin_scores, width=1 / n_bins, align="center", alpha=0.7,
+           color="steelblue", label="Mean arith step score")
+    ax.plot([0, 1], [0, 1], "k--", linewidth=1, label="Perfect calibration")
+    ax.set_xlabel("Confidence")
+    ax.set_ylabel("Mean arithmetic step score")
+    ax.set_title(f"{label}  (ECE-arith = {ece_arith:.3f})")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
 def spearman_sim(results: list[dict], confidence_key: str = "confidence") -> float:
     """Spearman correlation between confidence and ordinal similarity rank (low=0/medium=1/high=2)."""
     labeled = [
@@ -586,6 +815,175 @@ def plot_confidence_distribution_3way(
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
+
+
+_ROC_CONF_KEYS = [
+    ("confidence",               "Majority Vote"),
+    ("weighted_mean_confidence", "Weighted"),
+]
+
+
+def plot_roc_curve(
+    results: list[dict],
+    output_path: str,
+    label_fn,
+    title: str | None = None,
+) -> None:
+    """
+    ROC curve overlaying both confidence measures on one plot.
+
+    label_fn(r) -> bool | None  — returns the positive/negative label for each
+    result dict, or None to skip that problem. Caller defines what "positive" means
+    (binary correct, arith step score >= threshold, similarity rank == high, etc.).
+    """
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.plot([0, 1], [0, 1], "k--", linewidth=1, label="Random (AUROC = 0.50)")
+
+    for conf_key, display_label in _ROC_CONF_KEYS:
+        labeled = []
+        for r in results:
+            lbl = label_fn(r)
+            if lbl is None:
+                continue
+            if conf_key not in r or math.isnan(float(r[conf_key])):
+                continue
+            labeled.append((float(r[conf_key]), bool(lbl)))
+
+        if not labeled:
+            continue
+        n_pos = sum(c for _, c in labeled)
+        n_neg = len(labeled) - n_pos
+        if n_pos == 0 or n_neg == 0:
+            continue
+
+        labeled.sort(key=lambda x: -x[0])
+        fprs, tprs = [0.0], [0.0]
+        tp = fp = 0
+        for _, correct in labeled:
+            if correct:
+                tp += 1
+            else:
+                fp += 1
+            fprs.append(fp / n_neg)
+            tprs.append(tp / n_pos)
+        fprs.append(1.0)
+        tprs.append(1.0)
+
+        auc = sum(
+            (fprs[i + 1] - fprs[i]) * (tprs[i + 1] + tprs[i]) / 2
+            for i in range(len(fprs) - 1)
+        )
+        ax.plot(fprs, tprs, label=f"{display_label} (AUROC = {auc:.3f})")
+
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    ax.set_title(title or "ROC Curve")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def _safe_eval_expr(expr: str) -> float | None:
+    """Evaluate a simple arithmetic expression string, returning None on failure."""
+    expr = expr.replace("×", "*").replace("÷", "/").replace("^", "**").strip()
+    if _SAFE_EXPR_RE.search(expr):
+        return None
+    try:
+        return float(eval(expr, {"__builtins__": {}}, {}))  # noqa: S307
+    except Exception:
+        return None
+
+
+def _parse_numeric(s: str) -> float | None:
+    """Extract the first numeric value from a string."""
+    m = re.search(r"-?\d+\.?\d*", s.replace(",", ""))
+    if m:
+        try:
+            return float(m.group())
+        except ValueError:
+            return None
+    return None
+
+
+def arithmetic_step_correctness(raw: str) -> dict:
+    """
+    Parse all <<expr=result>> annotations from a model output and verify each.
+
+    Correctness is purely internal — no reference solution required.
+    Returns arith_steps_total, arith_steps_correct, arith_step_score, arith_steps_detail.
+    """
+    detail = []
+    n_correct = 0
+    for expr_str, claimed_str in _ARITH_ANNOTATION.findall(raw):
+        actual  = _safe_eval_expr(expr_str)
+        claimed = _parse_numeric(claimed_str)
+        if actual is None or claimed is None:
+            correct = False
+        else:
+            tol = max(1e-6, 1e-6 * abs(actual))
+            correct = abs(actual - claimed) <= tol
+        if correct:
+            n_correct += 1
+        detail.append({
+            "expr":    expr_str.strip(),
+            "claimed": round(claimed, 6) if claimed is not None else None,
+            "actual":  round(actual,  6) if actual  is not None else None,
+            "correct": correct,
+        })
+    n_total = len(detail)
+    return {
+        "arith_steps_total":   n_total,
+        "arith_steps_correct": n_correct,
+        "arith_step_score":    round(n_correct / n_total, 4) if n_total else float("nan"),
+        "arith_steps_detail":  detail,
+    }
+
+
+def _extract_ref_values(text: str) -> set[float]:
+    """Extract the numeric result values from all <<expr=result>> annotations in text."""
+    values: set[float] = set()
+    for _, claimed_str in _ARITH_ANNOTATION.findall(text):
+        v = _parse_numeric(claimed_str)
+        if v is not None:
+            values.add(v)
+    return values
+
+
+def reference_alignment(raw: str, reference_solution: str) -> dict:
+    """
+    Compare model output <<expr=result>> result values against ground truth values.
+
+    Extracts the numeric result (value after = and before >>) from every
+    <<expr=result>> annotation in both the model output and the reference solution,
+    then computes set-based coverage:
+
+        ref_alignment_score = |ref_values ∩ model_values| / |ref_values|
+
+    Only result values are compared — expressions are ignored — so a model that
+    writes <<96/4=24>> matches a reference <<48/2=24>> because both arrive at 24.
+
+    Returns ref_alignment_score = NaN when the reference has no <<>> annotations
+    (e.g. MATH dataset without preprocessing).
+    """
+    ref_values   = _extract_ref_values(reference_solution)
+    model_values = _extract_ref_values(raw)
+
+    if not ref_values:
+        return {
+            "ref_values_total":    0,
+            "ref_values_matched":  0,
+            "ref_alignment_score": float("nan"),
+        }
+
+    matched = len(ref_values & model_values)
+    return {
+        "ref_values_total":    len(ref_values),
+        "ref_values_matched":  matched,
+        "ref_alignment_score": round(matched / len(ref_values), 4),
+    }
 
 
 def answer_entropy(answers: list[str]) -> float:
@@ -802,7 +1200,7 @@ def summarise(results: list[dict]) -> dict:
 
     oc = overconfidence_analysis(results)
 
-    return {
+    summary = {
         "n_problems": n_total,
         "n_labeled":  n_labeled,
         "accuracy":   round(accuracy, 4),
@@ -841,4 +1239,37 @@ def summarise(results: list[dict]) -> dict:
         # --- Discrimination: AUROC (embedding similarity — high vs low+medium) ---
         "auroc_sim_confidence": auroc_sim(results, confidence_key="confidence"),
         "auroc_sim_weighted":   auroc_sim(results, confidence_key="weighted_mean_confidence"),
+
+        # --- Arithmetic step correctness aggregate ---
+        "mean_arith_step_score": _mean("arith_step_score"),
+        "arith_steps_total":   sum(r.get("arith_steps_total",   0) for r in results),
+        "arith_steps_correct": sum(r.get("arith_steps_correct", 0) for r in results),
+
+        # --- Calibration: ECE (arithmetic step correctness) ---
+        "ece_arith_confidence": expected_calibration_error_arith(results, confidence_key="confidence"),
+        "ece_arith_weighted":   expected_calibration_error_arith(results, confidence_key="weighted_mean_confidence"),
+
+        # --- Discrimination: AUROC (arithmetic step correctness) ---
+        "auroc_arith_confidence": auroc_arith(results, confidence_key="confidence"),
+        "auroc_arith_weighted":   auroc_arith(results, confidence_key="weighted_mean_confidence"),
+
+        # --- Reference alignment aggregate (GSM8K only, when enabled) ---
+        "mean_ref_alignment_score": _mean("ref_alignment_score"),
+        "ref_values_total":   sum(r.get("ref_values_total",   0) for r in results),
+        "ref_values_matched": sum(r.get("ref_values_matched", 0) for r in results),
     }
+
+    # --- LLM judge aggregate (present only after llm_judge enrichment) ---
+    # (conditional — not populated until run_llm_judge has been run)
+    if any(r.get("judge_rank") in _JUDGE_SCORE for r in results):
+        summary.update({
+            "judge_rank_good":   sum(1 for r in results if r.get("judge_rank") == "good"),
+            "judge_rank_medium": sum(1 for r in results if r.get("judge_rank") == "medium"),
+            "judge_rank_bad":    sum(1 for r in results if r.get("judge_rank") == "bad"),
+            "ece_judge_confidence": expected_calibration_error_judge(results, confidence_key="confidence"),
+            "ece_judge_weighted":   expected_calibration_error_judge(results, confidence_key="weighted_mean_confidence"),
+            "auroc_judge_confidence": auroc_judge(results, confidence_key="confidence"),
+            "auroc_judge_weighted":   auroc_judge(results, confidence_key="weighted_mean_confidence"),
+        })
+
+    return summary

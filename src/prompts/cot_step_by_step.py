@@ -1,21 +1,21 @@
 """
-Few-shot Chain-of-Thought prompt builder.
+Few-shot Chain-of-Thought + Step-by-step prompt builder.
 
-Fixed hand-written examples are prepended as user/assistant turns before the
-test problem. Assistant turns demonstrate the <<expr=result>> annotation format
-in natural prose, ending with "Final Answer: {answer}".
+Same three examples as cot.py but each assistant turn uses explicit Step N:
+labels, enforcing a more structured decomposition. The system prompt also
+reinforces numbered steps.
 """
 from __future__ import annotations
 
 SYSTEM_PROMPT = (
     "You are a careful mathematical reasoning assistant. "
-    "Solve the problem step by step. "
+    "Break your solution into explicit numbered steps, one per line. "
     "For every arithmetic operation write the expression and its result as "
     "<<expr=result>> — for example, 3 × 4 = <<3*4=12>>12. "
     'End your response with "Final Answer: {answer}".'
 )
 
-COT_EXAMPLES: list[dict] = [
+COT_STEP_EXAMPLES: list[dict] = [
     {
         "problem": (
             "A store has 50 apples. They sell 23 in the morning and receive "
@@ -23,10 +23,9 @@ COT_EXAMPLES: list[dict] = [
             "store have at the end of the day?"
         ),
         "solution": (
-            "Let me solve this step by step.\n"
-            "The store starts with 50 apples.\n"
-            "After selling 23 in the morning: 50 - 23 = <<50-23=27>>27 apples.\n"
-            "After receiving a delivery of 15: 27 + 15 = <<27+15=42>>42 apples."
+            "Step 1: The store starts with 50 apples.\n"
+            "Step 2: After the morning sale: 50 - 23 = <<50-23=27>>27 apples.\n"
+            "Step 3: After the afternoon delivery: 27 + 15 = <<27+15=42>>42 apples."
         ),
         "answer": "42",
     },
@@ -36,10 +35,9 @@ COT_EXAMPLES: list[dict] = [
             "How much does she earn in a week?"
         ),
         "solution": (
-            "Let me solve this step by step.\n"
-            "Sarah earns $12 per hour.\n"
-            "She works 8 hours per day: 12 × 8 = <<12*8=96>>96 per day.\n"
-            "She works 5 days a week: 96 × 5 = <<96*5=480>>480 per week."
+            "Step 1: Sarah earns $12 per hour.\n"
+            "Step 2: Daily earnings: 12 × 8 = <<12*8=96>>96 per day.\n"
+            "Step 3: Weekly earnings: 96 × 5 = <<96*5=480>>480 per week."
         ),
         "answer": "480",
     },
@@ -49,18 +47,17 @@ COT_EXAMPLES: list[dict] = [
             "2 hours and 30 minutes?"
         ),
         "solution": (
-            "Let me solve this step by step.\n"
-            "Convert time to hours: 2 hours 30 minutes = 2.5 hours.\n"
-            "Distance = speed × time: 60 × 2.5 = <<60*2.5=150>>150 miles."
+            "Step 1: Convert time to hours: 2 hours 30 minutes = 2.5 hours.\n"
+            "Step 2: Distance = speed × time: 60 × 2.5 = <<60*2.5=150>>150 miles."
         ),
         "answer": "150",
     },
 ]
 
 
-def build_cot_messages(
+def build_cot_step_by_step_messages(
     problem: str,
-    examples: list[dict] = COT_EXAMPLES,
+    examples: list[dict] = COT_STEP_EXAMPLES,
     system_prompt: str = SYSTEM_PROMPT,
 ) -> list[dict]:
     messages = [{"role": "system", "content": system_prompt}]
