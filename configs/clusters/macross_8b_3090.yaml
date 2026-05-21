@@ -1,5 +1,5 @@
 hardware:
-  cuda_devices: "2"
+  cuda_devices: "0"
   n_gpus: 1
 
 paths:
