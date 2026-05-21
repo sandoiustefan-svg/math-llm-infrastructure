@@ -35,3 +35,7 @@ pytest
 
 sentence_transformers
 faiss-cpu
+
+sacrebleu
+rouge-score
+nltk
