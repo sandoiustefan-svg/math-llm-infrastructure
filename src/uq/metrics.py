@@ -46,6 +46,7 @@ _ROC_CONF_KEYS = [
 
 def _strip_latex(s: str) -> str:
     s = re.sub(r"\\boxed\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\\\$", "", s)   # \$ (LaTeX dollar sign) → nothing, before bare-$ strip
     s = re.sub(r"\$+", "", s)
     s = re.sub(r"\\text\{([^}]*)\}", r"\1", s)
     s = re.sub(r"\\left|\\right", "", s)
@@ -129,30 +130,27 @@ def _normalize_for_nlg(text: str) -> str:
 
 def compute_nlg_scores(output: str, reference: str) -> dict:
     """
-    Compute BLEU, ROUGE-1/2/L and METEOR between one output and the reference.
+    Compute ROUGE-L and METEOR between one output and the reference.
     Both texts are LaTeX-normalised before scoring.
-    Returns NaN for all metrics when either text is empty.
+    Returns NaN for both metrics when either text is empty.
     """
-    _nan = {k: float("nan") for k in ("bleu", "rouge1", "rouge2", "rougeL", "meteor")}
+    _nan = {"rougeL": float("nan"), "meteor": float("nan")}
     out_norm = _normalize_for_nlg(output).strip()
     ref_norm = _normalize_for_nlg(reference).strip()
     if not out_norm or not ref_norm:
         return _nan
 
     try:
-        import sacrebleu
         from rouge_score import rouge_scorer as _rouge_scorer
         import nltk
         from nltk.translate.meteor_score import meteor_score as _meteor_fn
     except ImportError as e:
         raise ImportError(
             f"NLG metric libraries missing: {e}. "
-            "Run: pip install sacrebleu rouge-score nltk"
+            "Run: pip install rouge-score nltk"
         ) from e
 
-    bleu = sacrebleu.sentence_bleu(out_norm, [ref_norm]).score / 100.0
-
-    scorer = _rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=False)
+    scorer = _rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
     rouge = scorer.score(ref_norm, out_norm)
 
     ref_tok = ref_norm.split()
@@ -160,11 +158,8 @@ def compute_nlg_scores(output: str, reference: str) -> dict:
     meteor = _meteor_fn([ref_tok], hyp_tok) if ref_tok and hyp_tok else 0.0
 
     return {
-        "bleu":   round(bleu,                        6),
-        "rouge1": round(rouge["rouge1"].fmeasure,    6),
-        "rouge2": round(rouge["rouge2"].fmeasure,    6),
-        "rougeL": round(rouge["rougeL"].fmeasure,    6),
-        "meteor": round(float(meteor),               6),
+        "rougeL": round(rouge["rougeL"].fmeasure, 6),
+        "meteor": round(float(meteor),            6),
     }
 
 
@@ -899,7 +894,7 @@ def summarise(results: list[dict]) -> dict:
         summary[f"auroc_{short}"] = auroc(results, confidence_key=ck)
 
     # NLG baselines aggregate
-    for metric in ("bleu", "rouge1", "rouge2", "rougeL", "meteor"):
+    for metric in ("rougeL", "meteor"):
         summary[f"mean_{metric}"] = _mean(f"mean_{metric}")
 
     # ECE and AUROC against ROUGE-L (NLG baseline — all three confidence measures)

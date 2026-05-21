@@ -154,9 +154,6 @@ class MCDropoutEvaluator:
             reference = item.get("reference_solution") or ""
             nlg_per_pass = [compute_nlg_scores(raw, reference) for raw in raws]
 
-            def _nlg_list(metric: str) -> list[float]:
-                return [s[metric] for s in nlg_per_pass]
-
             def _nlg_mean(metric: str) -> float:
                 vals = [s[metric] for s in nlg_per_pass if not math.isnan(s[metric])]
                 return round(sum(vals) / len(vals), 6) if vals else float("nan")
@@ -194,16 +191,8 @@ class MCDropoutEvaluator:
                 # Position-weighted token probability
                 "weighted_mean_confidence":      _avg("weighted_mean_confidence"),
                 "weighted_perplexity":           _avg("weighted_perplexity"),
-                # NLG baselines — per-pass lists and means
-                "bleu_scores":   _nlg_list("bleu"),
-                "mean_bleu":     _nlg_mean("bleu"),
-                "rouge1_scores": _nlg_list("rouge1"),
-                "mean_rouge1":   _nlg_mean("rouge1"),
-                "rouge2_scores": _nlg_list("rouge2"),
-                "mean_rouge2":   _nlg_mean("rouge2"),
-                "rougeL_scores": _nlg_list("rougeL"),
+                # NLG baselines
                 "mean_rougeL":   _nlg_mean("rougeL"),
-                "meteor_scores": _nlg_list("meteor"),
                 "mean_meteor":   _nlg_mean("meteor"),
             })
 
