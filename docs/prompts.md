@@ -161,5 +161,5 @@ reinforces numbered steps.
 | Prompt length | shortest | medium (~500 tokens) | medium (~500 tokens) |
 | Expected benefit | baseline | format adherence | structured decomposition |
 
-All three variants are evaluated under the same three metrics:
-binary correctness, embedding similarity, and arithmetic step correctness.
+All three variants are evaluated under the same metrics:
+binary correctness, LLM-as-judge rank, and NLG baselines (BLEU / ROUGE / METEOR).

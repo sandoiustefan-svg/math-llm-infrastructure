@@ -17,18 +17,17 @@ results/mc_dropout/<label>/<source>/<prompt>/
     selective_prediction.png
   binary_correctness/
     reliability_confidence.png
+    reliability_full_sequence_confidence.png
     reliability_weighted_mean_confidence.png
     roc_binary.png
-  embedding_similarity/
-    reliability_sim_confidence.png
-    reliability_sim_weighted_mean_confidence.png
-    roc_sim.png
-  arithmetic_correctness/
-    reliability_arith_confidence.png
-    reliability_arith_weighted_mean_confidence.png
-    roc_arith.png
+  nlg_baselines/
+    reliability_rougeL_confidence.png
+    reliability_rougeL_full_sequence_confidence.png
+    reliability_rougeL_weighted_mean_confidence.png
+    roc_rougeL.png
   judge_correctness/               ← produced by src/uq/llm_judge.py
     reliability_judge_confidence.png
+    reliability_judge_full_sequence_confidence.png
     reliability_judge_weighted_mean_confidence.png
     roc_judge.png
 ```
@@ -42,16 +41,18 @@ Where:
 
 ## Confidence measures
 
-Two confidence measures appear across all plots:
+Three confidence measures appear across all plots:
 
 | Name | Key in results.json | What it measures |
 |---|---|---|
-| Majority Vote | `confidence` | Fraction of 20 MC Dropout passes that agreed on the same answer |
+| Majority Vote | `confidence` | Fraction of 20 MC Dropout passes that agreed on the same answer — answer-level signal |
+| Unweighted | `full_sequence_mean_confidence` | Geometric mean of all token probabilities equally weighted — token-level baseline, inflated by glue tokens |
 | Weighted | `weighted_mean_confidence` | Geometric mean token probability, with `<<expr=result>>` result tokens at 10× and Final Answer span at 25× |
 
-The weighted measure is the hypothesis: by down-weighting glue tokens and focusing on
-arithmetic-critical tokens, it should correlate better with correctness than the
-unweighted baseline.
+The progression: `full_sequence_mean_confidence` is the naive token-level baseline (expected to
+be poorly calibrated due to glue token inflation); `confidence` avoids that by operating at
+answer level; `weighted_mean_confidence` is the hypothesis that focusing token probability
+on arithmetic-critical tokens beats both.
 
 ---
 
@@ -102,7 +103,7 @@ y-axis (signal)
 - **Bars above the diagonal** → underconfident: the model is more often right than it thinks.
 - **ECE** (shown in the title) = weighted average gap between bars and diagonal. Lower is better.
 
-There are two reliability diagrams per correctness signal — one for each confidence measure.
+There are three reliability diagrams per correctness signal — one for each confidence measure.
 
 ---
 
@@ -119,33 +120,21 @@ close to the diagonal? The ECE shown in the title is the primary calibration met
 
 ---
 
-### `embedding_similarity/reliability_sim_confidence.png`
-### `embedding_similarity/reliability_sim_weighted_mean_confidence.png`
+### `nlg_baselines/reliability_rougeL_confidence.png`
+### `nlg_baselines/reliability_rougeL_weighted_mean_confidence.png`
 
-**Y-axis:** Mean cosine similarity between the model output and `reference_solution`
-(using `all-MiniLM-L6-v2`) in each confidence bin.
+**Y-axis:** Mean ROUGE-L F1 score between the model output and `reference_solution`
+in each confidence bin. ROUGE-L is used as the representative NLG metric (LCS-based,
+less sensitive to exact n-gram matches than ROUGE-1/2).
 
-**What to look for:** Does higher confidence correspond to reasoning that is semantically
-closer to the ground truth? ECE-sim measures calibration against this signal.
+**What to look for:** Does higher confidence correspond to outputs that overlap more
+with the reference solution text? ECE-rougeL measures calibration against this signal.
 
-**Expected pattern:** A nearly flat curve regardless of confidence — embedding similarity
-is a known weak signal for mathematical text. This plot is included as a baseline to
-demonstrate that limitation explicitly. ECE-sim ≈ 0.28 in pilot experiments.
-
----
-
-### `arithmetic_correctness/reliability_arith_confidence.png`
-### `arithmetic_correctness/reliability_arith_weighted_mean_confidence.png`
-
-**Y-axis:** Mean arithmetic step score in each confidence bin. The arithmetic step score
-is the fraction of `<<expr=result>>` annotations in the model output where `eval(expr) ≈ result`.
-
-**What to look for:** Does higher confidence correspond to more arithmetically correct
-intermediate steps? ECE-arith measures calibration against this signal.
-
-**Expected pattern:** A stronger signal than embedding similarity (ECE-arith < ECE-sim)
-because the metric is computed on the exact tokens the model was instructed to produce.
-Step-by-step prompting should raise the mean score across all bins.
+**Expected pattern:** A nearly flat curve regardless of confidence — n-gram overlap
+is a known weak signal for mathematical reasoning. This plot is the negative baseline:
+it is included to explicitly demonstrate that surface-form similarity carries little
+calibration information. ECE-rougeL is expected to be substantially higher than
+ECE-judge.
 
 ---
 
@@ -158,9 +147,9 @@ Step-by-step prompting should raise the mean score across all bins.
 **What to look for:** Does higher confidence correspond to semantically better answers?
 ECE-judge measures calibration against this signal.
 
-**Expected pattern:** The strongest reliability signal of the four — the judge
-understands mathematical reasoning and awards partial credit. Bars should rise more
-consistently with confidence than the other signals, giving lower ECE.
+**Expected pattern:** The strongest reliability signal — the judge understands
+mathematical reasoning and awards partial credit. Bars should rise more consistently
+with confidence than the NLG baselines, giving lower ECE.
 
 The `medium` bin is the most informative: problems the judge rates `medium` are cases
 where the model reasoned correctly but extracted the final answer incorrectly. A higher
@@ -191,7 +180,7 @@ TPR (True Positive Rate)
 - **AUROC = 0.5** → no better than random (confidence is uninformative).
 - **AUROC < 0.5** → confidence is inversely correlated with correctness (pathological).
 
-The AUROC for each measure is shown in the legend.
+All three confidence measures are overlaid on one plot. The AUROC for each is shown in the legend.
 
 ---
 
@@ -204,22 +193,14 @@ Primary discrimination metric — how well does confidence separate right from w
 
 ---
 
-### `embedding_similarity/roc_sim.png`
+### `nlg_baselines/roc_rougeL.png`
 
-**Positive class:** `similarity_rank == "high"` (cosine similarity > 0.7).
-**Negative class:** `similarity_rank` in `"low"` or `"medium"`.
+**Positive class:** `mean_rougeL >= 0.4` (above-median overlap with reference).
+**Negative class:** `mean_rougeL < 0.4`.
 
-Expected to show AUROC near 0.5 (baseline; similarity rank is a weak signal).
-
----
-
-### `arithmetic_correctness/roc_arith.png`
-
-**Positive class:** `arith_step_score >= 0.8`.
-**Negative class:** `arith_step_score < 0.8`.
-
-Does high confidence predict that the model's arithmetic annotations are internally
-consistent? Expected to be stronger than the similarity ROC.
+Expected to show AUROC near 0.5 — surface-form overlap with the reference solution
+is a poor proxy for correctness, so confidence should not discriminate it well.
+Included as the NLG negative baseline; compare directly against `roc_judge.png`.
 
 ---
 
@@ -229,8 +210,8 @@ consistent? Expected to be stronger than the similarity ROC.
 **Negative class:** `judge_rank` in `"medium"` or `"bad"`.
 
 Expected to be the strongest ROC signal — the judge makes a holistic correctness
-judgement. Comparing AUROC-judge vs AUROC-binary reveals whether the judge signal
-provides additional discriminative power beyond exact answer matching.
+judgement. Comparing AUROC-judge vs AUROC-rougeL reveals the discriminative gap
+between semantic understanding and surface-form overlap for math reasoning.
 
 ---
 
@@ -242,8 +223,8 @@ The 2 × 3 factorial design (2 models × 3 prompts) on 2 datasets produces
 | Comparison | What to look at |
 |---|---|
 | zero_shot vs cot vs cot_step_by_step | Reliability diagrams: do bars move closer to diagonal? |
-| zero_shot vs cot vs cot_step_by_step | `mean_arith_step_score` and ROC-arith: does structured prompting improve intermediate arithmetic? |
+| zero_shot vs cot vs cot_step_by_step | `judge_rank_medium` count: does structured prompting reduce reasoning errors? |
 | 1B vs 8B | Overall accuracy and ECE: does scale improve calibration independently of prompting? |
 | GSM8K vs MATH | Drop in accuracy and AUROC from in-distribution to OOD |
 | majority-vote vs weighted confidence | Which measure gives lower ECE and higher AUROC consistently? |
-| judge_rank_medium across prompts | Does step-by-step prompting reduce `medium` → `bad` transitions (improve answer extraction)? |
+| judge AUROC vs rougeL AUROC | Quantifies how much better semantic understanding is than n-gram overlap for calibration |

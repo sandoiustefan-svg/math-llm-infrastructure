@@ -1,10 +1,10 @@
 hardware:
-  cuda_devices: "0,1"
-  n_gpus: 2
+  cuda_devices: "2"
+  n_gpus: 1
 
 paths:
   base_dir:      /home/bsandoiu/math-llm-infrastructure
   hf_cache:      /home/bsandoiu/.cache/huggingface
   data_dir:      /home/bsandoiu/math-llm-infrastructure/data/processed/openmathinstruct2/shards
-  output_dir:    /home/bsandoiu/math-llm-infrastructure/outputs/lora_1b
+  output_dir:    /home/bsandoiu/math-llm-infrastructure/outputs/lora_8b
   test_sets_dir: /home/bsandoiu/math-llm-infrastructure/data/test_sets

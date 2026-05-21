@@ -150,8 +150,9 @@ def enrich(results: list[dict], provider: str, model: str, max_concurrent: int) 
 # ---------------------------------------------------------------------------
 
 _CONF_KEYS = [
-    ("confidence",               "Majority Vote Confidence"),
-    ("weighted_mean_confidence", "Weighted Mean Confidence"),
+    ("confidence",                    "Majority Vote Confidence"),
+    ("full_sequence_mean_confidence", "Unweighted Confidence"),
+    ("weighted_mean_confidence",      "Weighted Mean Confidence"),
 ]
 
 

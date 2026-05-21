@@ -8,20 +8,18 @@ weighted/unweighted geometric mean, answer entropy) see `docs/uncertainty_method
 
 ## Correctness signals
 
-Four complementary correctness signals are used per problem:
+Three correctness signals are used per problem:
 
 - **Binary correctness** — `answers_are_equal()` string match on the extracted final
-  answer. Fast and unambiguous, but ignores the reasoning process.
-- **Embedding similarity** — cosine similarity between the full raw output and the
-  `reference_solution`, using `all-MiniLM-L6-v2`. Retained as a baseline; known to
-  be a weak signal for mathematical text.
-- **Arithmetic step correctness** — fraction of `<<expr=result>>` annotations in the
-  model's output that evaluate correctly: `eval(expr) ≈ result` within a numeric
-  tolerance. Measures whether the model's stated arithmetic is internally consistent,
-  independent of the reference solution. See [Arithmetic step correctness](#arithmetic-step-correctness) below.
+  answer, with sympy symbolic equivalence as a fallback for MATH (handles cases like
+  `\frac{1}{2}` vs `0.5`). Fast and unambiguous, but ignores the reasoning process.
 - **LLM-as-judge rank** — a post-processing step that assigns `good / medium / bad`
   to the majority answer using an external LLM judge. Captures semantic correctness
   and partial credit that binary correctness misses. See [LLM-as-judge rank](#llm-as-judge-rank-semantic-correctness) below.
+- **NLG baselines (BLEU / ROUGE / METEOR)** — standard sequence-overlap metrics
+  computed between each MC Dropout pass output and the full `reference_solution`.
+  Included as weak baselines to demonstrate their inadequacy for mathematical reasoning.
+  See [NLG baselines](#nlg-baselines-bleu--rouge--meteor) below.
 
 ## Central research question
 
@@ -30,9 +28,11 @@ and does structured prompting improve that alignment?**
 
 Metrics are organised around two ways of answering that question — calibration and
 discrimination — plus a direct analysis of the overconfidence failure mode.
-All four correctness signals are used against both confidence measures
-(`confidence` and `weighted_mean_confidence`); see `docs/uncertainty_methods.md`
-for how those measures are computed.
+Binary correctness and the LLM judge are used as the primary correctness signals
+against all three confidence measures (`confidence`, `full_sequence_mean_confidence`,
+and `weighted_mean_confidence`); the NLG baselines are retained to show they carry
+weaker calibration signal. See `docs/uncertainty_methods.md` for how the confidence
+measures are computed.
 
 ---
 
@@ -49,11 +49,10 @@ ECE = Σ_b (|b| / N) * |accuracy(b) - mean_confidence(b)|
 
 ECE = 0 → perfect calibration. ECE > 0.15 → poor calibration.
 
-Computed for both confidence measures against **all four correctness signals**:
-- `ece_confidence`, `ece_weighted` — against binary correctness
-- `ece_sim_confidence`, `ece_sim_weighted` — against mean embedding similarity
-- `ece_arith_confidence`, `ece_arith_weighted` — against arithmetic step correctness
-- `ece_judge_confidence`, `ece_judge_weighted` — against LLM judge score (good=1, medium=0.5, bad=0)
+Computed for all three confidence measures against all correctness signals:
+- `ece_confidence`, `ece_full_sequence`, `ece_weighted` — against binary correctness
+- `ece_judge_confidence`, `ece_judge_full_sequence`, `ece_judge_weighted` — against LLM judge score (good=1, medium=0.5, bad=0)
+- `ece_rougeL_confidence`, `ece_rougeL_full_sequence`, `ece_rougeL_weighted` — against mean ROUGE-L score (NLG baseline)
 
 ---
 
@@ -67,11 +66,10 @@ AUROC = 0.5  →  no better than random
 AUROC = 1.0  →  perfect discrimination
 ```
 
-Computed for both confidence measures against **all four correctness signals**:
-- `auroc_confidence`, `auroc_weighted` — binary correct vs wrong
-- `auroc_sim_confidence`, `auroc_sim_weighted` — high similarity rank vs low+medium
-- `auroc_arith_confidence`, `auroc_arith_weighted` — high arithmetic correctness vs low
-- `auroc_judge_confidence`, `auroc_judge_weighted` — judge `good` vs `medium+bad`
+Computed for all three confidence measures against all correctness signals:
+- `auroc_confidence`, `auroc_full_sequence`, `auroc_weighted` — binary correct vs wrong
+- `auroc_judge_confidence`, `auroc_judge_full_sequence`, `auroc_judge_weighted` — judge `good` vs `medium+bad`
+- `auroc_rougeL_confidence`, `auroc_rougeL_full_sequence`, `auroc_rougeL_weighted` — ROUGE-L above threshold vs below (NLG baseline)
 
 ---
 
@@ -97,123 +95,6 @@ the model commits to wrong answers just as confidently as right ones.
 
 ---
 
-## Arithmetic step correctness
-
-The arithmetic step metric has two components that can be used independently or together:
-
-1. **Internal consistency** — always active. Verifies the model's own arithmetic.
-2. **Reference alignment** — optional augmentation. Compares the model's intermediate
-   values against the ground truth's. Requires `<<expr=result>>` annotations in the
-   `reference_solution` field. Currently applicable to **GSM8K only**.
-
-### Internal consistency
-
-Each `<<expr=result>>` annotation in the model's output is extracted by regex and
-verified independently:
-
-```
-eval(expr) ≈ result   (within tolerance 1e-6 for floats, exact for integers)
-```
-
-This check requires no reference solution — it is purely about whether the model's
-own stated arithmetic is self-consistent. A model can score 1.0 here while still
-reasoning incorrectly (e.g. wrong problem setup, correct arithmetic on wrong values).
-
-### Reference alignment (optional augmentation)
-
-When enabled, the `<<expr=result>>` annotations in the **model output** are compared
-against the `<<expr=result>>` annotations in the **ground truth `reference_solution`**.
-Both sides use the same pattern — the result values (the number after `=` and before
-`>>`) are extracted from each and compared as sets.
-
-**Concrete example**
-
-```
-Ground truth reference_solution:
-  "Natalia sold 48/2 = <<48/2=24>>24 clips in May.
-   She sold 48+24 = <<48+24=72>>72 clips in total."
-
-  → ref_values = {24, 72}
-
-Model output (correct path):
-  "Half of 48 is 48/2 = <<48/2=24>>24.
-   Total: 48+24 = <<48+24=72>>72."
-
-  → model_values = {24, 72}
-  → ref_alignment_score = |{24,72} ∩ {24,72}| / |{24,72}| = 2/2 = 1.0
-
-Model output (wrong path):
-  "Natalia sold 48 clips in April and 48 more in May.
-   Total: 48+48 = <<48+48=96>>96."
-
-  → model_values = {96}
-  → ref_alignment_score = |{24,72} ∩ {96}| / |{24,72}| = 0/2 = 0.0
-```
-
-**Alignment strategy — value matching (no step ordering required)**
-
-Rather than aligning steps positionally (which requires a sequence alignment
-algorithm and is brittle when model and reference take different paths), reference
-alignment uses **set-based value matching**:
-
-```
-ref_values   = set of result values from reference_solution <<expr=result>> annotations
-model_values = set of result values from model output <<expr=result>> annotations
-
-ref_alignment_score = |ref_values ∩ model_values| / |ref_values|
-```
-
-This asks: *what fraction of the reference's key intermediate checkpoints does the
-model also arrive at?* A model that takes a different but valid path and arrives at
-the same intermediate numbers still scores high. A model that sets up the problem
-incorrectly (different numbers entirely) scores low even if its arithmetic is clean.
-This is an acknowledged limitation on problems with multiple valid solution paths,
-and less of an issue on GSM8K where problems typically have one natural path.
-
-**Activation**
-
-Reference alignment is disabled by default and activated per-run by passing
-`reference_alignment=True` to the evaluator. When the `reference_solution` field
-is absent or contains no `<<expr=result>>` annotations, the metric silently falls
-back to internal consistency only and records `ref_alignment_score: null`.
-
-### Fields in `results.json`
-
-| Key | Always present | What it stores |
-|---|---|---|
-| `arith_steps_total` | ✓ | Number of `<<expr=result>>` annotations in model output |
-| `arith_steps_correct` | ✓ | Annotations where `eval(expr) ≈ result` |
-| `arith_step_score` | ✓ | `arith_steps_correct / arith_steps_total` (NaN if 0) |
-| `arith_steps_detail` | ✓ | List of `{expr, claimed, actual, correct}` per annotation |
-| `ref_values_total` | when enabled | Number of intermediate values in reference solution |
-| `ref_values_matched` | when enabled | Reference values also found in model output |
-| `ref_alignment_score` | when enabled | `ref_values_matched / ref_values_total` (null if unavailable) |
-
-**How to read internal consistency alongside binary correctness**
-
-```
-                     Binary correct        Binary wrong
-High arith score │  correct reasoning   │  correct steps, wrong final answer
-                 │  correct answer  ✓   │  (setup/extraction error)
-─────────────────┼──────────────────────┼───────────────────────────────────
-Low arith score  │  correct answer      │  wrong reasoning
-                 │  despite errors      │  wrong answer  ✗
-                 │  (lucky guess)       │
-```
-
-**How to read reference alignment alongside internal consistency**
-
-```
-                         High ref alignment    Low ref alignment
-High internal score  │  correct path        │  different path,
-                     │  correct arithmetic  │  correct arithmetic
-─────────────────────┼──────────────────────┼──────────────────────
-Low internal score   │  right path,         │  wrong path,
-                     │  arithmetic errors   │  arithmetic errors
-```
-
----
-
 ## LLM-as-judge rank (semantic correctness)
 
 A post-processing step applied to `results.json` after inference. An external LLM
@@ -226,8 +107,7 @@ labels, stored as `judge_rank`:
 | `medium` | Wrong final answer but correct approach / partial credit |
 | `bad` | Wrong answer and flawed or irrelevant reasoning |
 
-This is structurally identical to `similarity_rank` and slots into the same metric
-infrastructure:
+This is the primary reasoning-quality signal:
 
 - **ECE**: `ece_judge_confidence`, `ece_judge_weighted` — calibration against judge rank
 - **AUROC**: `auroc_judge_confidence`, `auroc_judge_weighted` — `good` vs `medium+bad`
@@ -236,7 +116,7 @@ infrastructure:
 **Why three labels instead of binary**
 
 The `medium` bucket captures the case binary correctness misses: the model sets up the
-problem correctly and executes valid arithmetic but makes an error at the final
+problem correctly and executes valid reasoning but makes an error at the final
 extraction or simplification step. This is distinct from a fully wrong answer and
 useful for separating prompt variants that improve reasoning quality from those that
 only improve answer formatting.
@@ -270,46 +150,52 @@ with ~630 input tokens and ~10 output tokens per call:
 | GPT-4o | ~$13 |
 | Claude Haiku 4.5 | ~$5 |
 
-**Comparison with embedding similarity**
-
-| | Embedding similarity | LLM-as-judge rank |
-|---|---|---|
-| Signal strength for math | Weak (ECE-sim ≈ 0.28) | Strong (semantic understanding) |
-| Cost | Free (local model) | ~$1 API cost |
-| Partial credit | No | Yes (`medium` label) |
-| Speed | Fast (batch encode) | Slow (serial API calls) |
-| Interpretability | Opaque cosine score | Human-readable label |
-
-Embedding similarity is retained as a baseline to explicitly demonstrate its
-limitations relative to the judge rank.
-
 ---
 
-## Embedding similarity (process-level correctness)
+## NLG baselines (BLEU / ROUGE / METEOR)
 
-Binary correctness only checks the final answer string. Embedding similarity
-captures whether the reasoning process itself is on the right track.
+Standard sequence-overlap metrics computed between each MC Dropout pass output and
+the full `reference_solution`. All three are retained as explicit weak baselines to
+demonstrate their inadequacy for mathematical reasoning.
 
-`all-MiniLM-L6-v2` encodes both the full raw output and the `reference_solution`
-(complete step-by-step reasoning from the dataset) into a 384-dimensional vector.
-Cosine similarity is computed for all 20 MC Dropout passes.
+**Computation**
 
-```
-sim(raw, reference_solution) = dot(embed(raw), embed(reference_solution))   # L2-normalised
-```
+Each metric is computed independently for every MC Dropout pass output against the
+`reference_solution` text, then averaged across all passes per problem.
 
-Four fields per problem in `results.json`:
+For the MATH dataset, both the model output and `reference_solution` are
+LaTeX-normalised before scoring: commands like `\frac`, `\sqrt`, `\cdot` are
+expanded to plain text equivalents and whitespace is standardised. This removes
+formatting differences that would otherwise penalise equivalent expressions.
+
+| Metric | Library | What it measures |
+|---|---|---|
+| BLEU | `sacrebleu` (sentence-level) | Precision-weighted n-gram overlap (n=1..4) |
+| ROUGE-1 / ROUGE-2 / ROUGE-L | `rouge-score` | Unigram / bigram / LCS recall-focused overlap |
+| METEOR | `nltk` | Unigram F-score with stemming and synonym matching |
+
+**Fields in `results.json` per problem**
 
 | Key | What it stores |
 |---|---|
-| `raw_similarities` | List of 20 cosine similarity scores (one per pass) |
-| `mean_raw_similarity` | Mean across all 20 passes |
-| `std_raw_similarity` | Std across passes — high value means reasoning varies between passes |
-| `similarity_rank` | `low` (< 0.3) / `medium` (0.3–0.7) / `high` (> 0.7) |
+| `bleu_scores` | List of BLEU scores, one per MC Dropout pass |
+| `mean_bleu` | Mean across all passes |
+| `rouge1_scores` | List of ROUGE-1 F1 scores, one per pass |
+| `mean_rouge1` | Mean across all passes |
+| `rouge2_scores` | List of ROUGE-2 F1 scores, one per pass |
+| `mean_rouge2` | Mean across all passes |
+| `rougeL_scores` | List of ROUGE-L F1 scores, one per pass |
+| `mean_rougeL` | Mean across all passes |
+| `meteor_scores` | List of METEOR scores, one per pass |
+| `mean_meteor` | Mean across all passes |
 
-Note: embedding similarity is known to be a weak correctness signal for mathematical
-text — semantically similar solutions can be arithmetically wrong, and vice versa.
-It is retained as a baseline to explicitly demonstrate this limitation.
+**Why these are weak baselines for math**
+
+n-gram overlap is sensitive to surface form, not mathematical meaning. Two solutions
+that take different but equally valid paths, or express the same calculation with
+different notation, will score low despite being semantically equivalent. ECE and
+AUROC against these metrics are expected to be substantially worse than against the
+LLM judge, making this a clear negative result that motivates the judge approach.
 
 ---
 
@@ -323,18 +209,17 @@ results/mc_dropout/<label>/<source>/<prompt>/
     selective_prediction.png
   binary_correctness/
     reliability_confidence.png
+    reliability_full_sequence_confidence.png
     reliability_weighted_mean_confidence.png
     roc_binary.png
-  embedding_similarity/
-    reliability_sim_confidence.png
-    reliability_sim_weighted_mean_confidence.png
-    roc_sim.png
-  arithmetic_correctness/
-    reliability_arith_confidence.png
-    reliability_arith_weighted_mean_confidence.png
-    roc_arith.png
+  nlg_baselines/
+    reliability_rougeL_confidence.png
+    reliability_rougeL_full_sequence_confidence.png
+    reliability_rougeL_weighted_mean_confidence.png
+    roc_rougeL.png
   judge_correctness/               ← produced by src/uq/llm_judge.py
     reliability_judge_confidence.png
+    reliability_judge_full_sequence_confidence.png
     reliability_judge_weighted_mean_confidence.png
     roc_judge.png
 ```
@@ -354,37 +239,35 @@ those included should be more accurate.
 
 ---
 
-### `binary_correctness/reliability_<measure>.png` — Reliability diagrams (×2)
+### `binary_correctness/reliability_<measure>.png` — Reliability diagrams (×3)
 
 Problems are binned into 10 confidence buckets. Each bar shows the actual fraction
 of correct problems in that bin. The diagonal is perfect calibration.
+One diagram per confidence measure: `confidence`, `full_sequence_confidence`, `weighted_mean_confidence`.
 
 ---
 
-### `embedding_similarity/reliability_sim_<measure>.png` — Similarity reliability diagrams (×2)
+### `nlg_baselines/reliability_rougeL_<measure>.png` — ROUGE-L reliability diagrams (×3)
 
-Same structure but y-axis shows mean embedding similarity per bin.
-Retained as a baseline; expected to show weak calibration signal.
-
----
-
-### `arithmetic_correctness/reliability_arith_<measure>.png` — Arithmetic reliability diagrams (×2)
-
-Same structure but y-axis shows mean arithmetic step score per bin.
-Answers: does higher confidence correspond to more arithmetically correct intermediate steps?
+Same structure but y-axis shows mean ROUGE-L score per bin.
+ROUGE-L is used as the representative NLG metric in reliability diagrams since it
+captures longest common subsequence rather than fixed-n n-gram overlap.
+Expected to show flat or weakly correlated bars — the intended negative result.
+One diagram per confidence measure.
 
 ---
 
-### `judge_correctness/reliability_judge_<measure>.png` — Judge reliability diagrams (×2)
+### `judge_correctness/reliability_judge_<measure>.png` — Judge reliability diagrams (×3)
 
 Same structure but y-axis shows mean judge score per bin (good=1, medium=0.5, bad=0).
 Produced by `src/uq/llm_judge.py` after inference; not present in the initial run output.
+One diagram per confidence measure.
 
 ---
 
 ### `judge_correctness/roc_judge.png` — ROC curve for judge rank
 
-`good` is the positive class; `medium + bad` is negative. Overlays both confidence
+`good` is the positive class; `medium + bad` is negative. Overlays all three confidence
 measures on one plot, same format as the other ROC curves.
 
 ---
@@ -397,9 +280,10 @@ measures on one plot, same format as the other ROC curves.
   "n_labeled":  500,
   "accuracy":   0.312,
 
-  "mean_answer_confidence":   0.41,
-  "mean_answer_entropy":      2.84,
-  "mean_weighted_confidence": 0.51,
+  "mean_answer_confidence":          0.41,
+  "mean_answer_entropy":             2.84,
+  "mean_full_sequence_confidence":   0.87,
+  "mean_weighted_confidence":        0.51,
 
   "overconf_high_conf_correct": 48,
   "overconf_high_conf_wrong":   62,
@@ -407,58 +291,49 @@ measures on one plot, same format as the other ROC curves.
   "overconf_low_conf_wrong":    282,
   "overconf_rate":              0.563,
 
-  "ece_confidence": 0.115,
-  "ece_weighted":   0.08,
+  "ece_confidence":    0.115,
+  "ece_full_sequence": 0.19,
+  "ece_weighted":      0.08,
 
-  "auroc_confidence": 0.71,
-  "auroc_weighted":   0.70,
+  "auroc_confidence":    0.71,
+  "auroc_full_sequence": 0.61,
+  "auroc_weighted":      0.70,
 
-  "mean_raw_similarity":     0.21,
-  "mean_std_raw_similarity": 0.04,
-  "sim_rank_low":    312,
-  "sim_rank_medium": 188,
-  "sim_rank_high":   0,
+  "mean_bleu":    0.08,
+  "mean_rouge1":  0.31,
+  "mean_rouge2":  0.14,
+  "mean_rougeL":  0.27,
+  "mean_meteor":  0.22,
 
-  "ece_sim_confidence": 0.28,
-  "ece_sim_weighted":   0.27,
+  "ece_rougeL_confidence":    0.24,
+  "ece_rougeL_full_sequence": 0.25,
+  "ece_rougeL_weighted":      0.23,
 
-  "auroc_sim_confidence": 0.52,
-  "auroc_sim_weighted":   0.51,
-
-  "mean_arith_step_score":    0.74,
-  "arith_steps_total":        3241,
-  "arith_steps_correct":      2398,
-
-  "ece_arith_confidence": 0.09,
-  "ece_arith_weighted":   0.07,
-
-  "auroc_arith_confidence": 0.68,
-  "auroc_arith_weighted":   0.66,
-
-  "mean_ref_alignment_score": 0.61,
-  "ref_values_total":         1847,
-  "ref_values_matched":       1127,
+  "auroc_rougeL_confidence":    0.54,
+  "auroc_rougeL_full_sequence": 0.52,
+  "auroc_rougeL_weighted":      0.53,
 
   // present only after src/uq/llm_judge.py has been run (summary_judged.json)
   "judge_rank_good":   201,
   "judge_rank_medium": 87,
   "judge_rank_bad":    212,
 
-  "ece_judge_confidence": 0.11,
-  "ece_judge_weighted":   0.09,
+  "ece_judge_confidence":    0.11,
+  "ece_judge_full_sequence": 0.17,
+  "ece_judge_weighted":      0.09,
 
-  "auroc_judge_confidence": 0.74,
-  "auroc_judge_weighted":   0.73
+  "auroc_judge_confidence":    0.74,
+  "auroc_judge_full_sequence": 0.64,
+  "auroc_judge_weighted":      0.73
 }
 ```
 
 **What to look at:**
 
 1. `overconf_rate` — fraction of high-confidence predictions that are wrong.
-2. `auroc_confidence` vs `auroc_weighted` — which measure better discriminates correct from incorrect?
-3. `ece_arith_*` vs `ece_confidence` / `ece_sim_*` — does arithmetic step score give better-calibrated ECE than embedding similarity?
-4. Compare `mean_arith_step_score` across prompt variants — does step-by-step prompting improve intermediate arithmetic correctness?
-5. `auroc_arith_*` — does confidence rank problems with correct intermediate steps above those with errors?
-6. `mean_ref_alignment_score` vs `mean_arith_step_score` (GSM8K only) — gap between these two reveals how often the model does correct arithmetic on the wrong reasoning path.
-7. `judge_rank_medium` count — how many problems had correct reasoning but wrong final answer? Compares directly across prompt variants to show whether structured prompting improves reasoning quality independently of answer extraction.
-8. `auroc_judge_*` vs `auroc_confidence` — does the judge signal give higher AUROC than binary correctness, indicating it is a more informative correctness signal for calibration analysis?
+2. `ece_confidence` vs `ece_full_sequence` vs `ece_weighted` — does focusing token probability on `<<expr=result>>` and Final Answer tokens give better calibration than the unweighted baseline?
+3. `auroc_confidence` vs `auroc_full_sequence` vs `auroc_weighted` — which confidence measure best discriminates correct from incorrect answers?
+4. `ece_judge_*` vs `ece_confidence` — does the judge give better-calibrated ECE than binary correctness across all three confidence measures?
+5. `auroc_judge_*` vs `auroc_rougeL_*` — does the judge signal give substantially higher AUROC than NLG overlap metrics, confirming they are inadequate for math reasoning?
+6. `judge_rank_medium` count — how many problems had correct reasoning but wrong final answer? Compare across prompt variants to show whether structured prompting improves reasoning quality independently of answer extraction.
+7. `mean_rougeL` / `mean_bleu` / `mean_meteor` across prompt variants — expected to be weakly correlated with judge rank, confirming the negative baseline result.

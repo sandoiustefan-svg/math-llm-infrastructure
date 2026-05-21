@@ -36,7 +36,7 @@ different answer the model has high epistemic uncertainty.
 
 ## Confidence measures
 
-Three complementary confidence signals are computed per problem:
+Three complementary confidence signals are computed per problem, forming a progression from naive to focused:
 
 | Key in `results.json` | What it measures |
 |---|---|

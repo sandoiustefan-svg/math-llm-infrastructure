@@ -11,26 +11,9 @@ from peft import PeftModel
 import math
 from src.uq.metrics import (
     answer_entropy, answers_are_equal, normalize_math_answer,
-    token_probability_confidence, arithmetic_step_correctness,
+    token_probability_confidence, compute_nlg_scores,
 )
 from src.prompts.zero_shot import build_zero_shot_messages
-
-
-def _avg_arith(raws: list[str]) -> dict:
-    """Average arithmetic step correctness across all MC Dropout passes."""
-    scores = [arithmetic_step_correctness(r) for r in raws]
-    valid  = [s for s in scores if not math.isnan(s["arith_step_score"])]
-    if not valid:
-        return {
-            "arith_step_score":    float("nan"),
-            "arith_steps_total":   0,
-            "arith_steps_correct": 0,
-        }
-    return {
-        "arith_step_score":    round(sum(s["arith_step_score"]    for s in valid) / len(valid), 4),
-        "arith_steps_total":   round(sum(s["arith_steps_total"]   for s in valid) / len(valid)),
-        "arith_steps_correct": round(sum(s["arith_steps_correct"] for s in valid) / len(valid)),
-    }
 
 
 
@@ -167,17 +150,28 @@ class MCDropoutEvaluator:
                 vals = [c[key] for c in pass_confs if not math.isnan(c.get(key, float("nan")))]
                 return round(sum(vals) / len(vals), 6) if vals else float("nan")
 
+            # NLG scores per pass against the reference solution.
+            reference = item.get("reference_solution") or ""
+            nlg_per_pass = [compute_nlg_scores(raw, reference) for raw in raws]
+
+            def _nlg_list(metric: str) -> list[float]:
+                return [s[metric] for s in nlg_per_pass]
+
+            def _nlg_mean(metric: str) -> float:
+                vals = [s[metric] for s in nlg_per_pass if not math.isnan(s[metric])]
+                return round(sum(vals) / len(vals), 6) if vals else float("nan")
+
             results.append({
-                "problem": item["problem"],
-                "expected_answer": item.get("expected_answer"),
+                "problem":            item["problem"],
+                "expected_answer":    item.get("expected_answer"),
                 "reference_solution": item.get("reference_solution"),
-                "raws": raws,
-                "answers": answers,
-                "majority_answer": majority,
-                "confidence": confidence,
-                "entropy": entropy,
-                "correct": correct,
-                # Full sequence (baseline — inflated by glue words)
+                "raws":               raws,
+                "answers":            answers,
+                "majority_answer":    majority,
+                "confidence":         confidence,
+                "entropy":            entropy,
+                "correct":            correct,
+                # Full sequence (baseline — inflated by glue tokens)
                 "full_sequence_mean_confidence": _avg("full_sequence_mean_confidence"),
                 "full_sequence_perplexity":      _avg("full_sequence_perplexity"),
                 "full_sequence_min_token_prob":  _avg("full_sequence_min_token_prob"),
@@ -187,7 +181,7 @@ class MCDropoutEvaluator:
                 "answer_span_perplexity":        _avg("answer_span_perplexity"),
                 "answer_span_min_token_prob":    _avg("answer_span_min_token_prob"),
                 "answer_span_std_token_prob":    _avg("answer_span_std_token_prob"),
-                # Numeric tokens — full sequence (all digit appearances)
+                # Numeric tokens — full sequence
                 "numeric_mean_confidence":       _avg("numeric_mean_confidence"),
                 "numeric_perplexity":            _avg("numeric_perplexity"),
                 "numeric_min_token_prob":        _avg("numeric_min_token_prob"),
@@ -200,8 +194,17 @@ class MCDropoutEvaluator:
                 # Position-weighted token probability
                 "weighted_mean_confidence":      _avg("weighted_mean_confidence"),
                 "weighted_perplexity":           _avg("weighted_perplexity"),
-                # Arithmetic step correctness — averaged across all passes
-                **_avg_arith(raws),
+                # NLG baselines — per-pass lists and means
+                "bleu_scores":   _nlg_list("bleu"),
+                "mean_bleu":     _nlg_mean("bleu"),
+                "rouge1_scores": _nlg_list("rouge1"),
+                "mean_rouge1":   _nlg_mean("rouge1"),
+                "rouge2_scores": _nlg_list("rouge2"),
+                "mean_rouge2":   _nlg_mean("rouge2"),
+                "rougeL_scores": _nlg_list("rougeL"),
+                "mean_rougeL":   _nlg_mean("rougeL"),
+                "meteor_scores": _nlg_list("meteor"),
+                "mean_meteor":   _nlg_mean("meteor"),
             })
 
         return results

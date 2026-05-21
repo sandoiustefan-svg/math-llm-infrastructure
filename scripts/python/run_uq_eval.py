@@ -42,17 +42,21 @@ def _load_cluster_cfg(cluster: str) -> dict:
 
 
 def _resolve_paths(cluster_cfg: dict, seed: int) -> dict:
-    paths = cluster_cfg["paths"]
-    gpus  = cluster_cfg["hardware"]
+    paths    = cluster_cfg["paths"]
+    gpus     = cluster_cfg["hardware"]
     base_dir = paths["base_dir"]
+    # Derive a short model label from the output_dir basename:
+    # "lora_1b" → "1b",  "lora_8b" → "8b"
+    model_label = Path(paths["output_dir"]).name.replace("lora_", "")
     return {
-        "base_dir":         base_dir,
-        "data_dir":         paths["data_dir"],
-        "base_output_dir":  paths["output_dir"],
-        "output_dir":       f"{paths['output_dir']}_seed{seed}",
-        "hf_cache":         paths["hf_cache"],
-        "cuda_devices":     str(gpus["cuda_devices"]),
-        "test_sets_dir":    paths.get("test_sets_dir", f"{base_dir}/data/test_sets"),
+        "base_dir":        base_dir,
+        "data_dir":        paths["data_dir"],
+        "base_output_dir": paths["output_dir"],
+        "output_dir":      f"{paths['output_dir']}_seed{seed}",
+        "hf_cache":        paths["hf_cache"],
+        "cuda_devices":    str(gpus["cuda_devices"]),
+        "test_sets_dir":   paths.get("test_sets_dir", f"{base_dir}/data/test_sets"),
+        "model_label":     model_label,
     }
 
 
@@ -62,12 +66,10 @@ def _resolve_paths(cluster_cfg: dict, seed: int) -> dict:
 
 def _write_results(results: list[dict], summary: dict, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-
     results_path = out_dir / "results.json"
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"Results  → {results_path}")
-
     summary_path = out_dir / "summary.json"
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
@@ -75,8 +77,9 @@ def _write_results(results: list[dict], summary: dict, out_dir: Path) -> None:
 
 
 _CONF_KEYS = [
-    ("confidence",            "Majority Vote Confidence"),
-    ("weighted_mean_confidence", "Weighted Mean Confidence"),
+    ("confidence",                    "Majority Vote Confidence"),
+    ("full_sequence_mean_confidence", "Unweighted Confidence"),
+    ("weighted_mean_confidence",      "Weighted Mean Confidence"),
 ]
 
 
@@ -96,43 +99,25 @@ def _plot_binary_correctness(results: list[dict], out_dir: Path) -> None:
     print(f"ROC (binary)      → {p}")
 
 
-def _plot_embedding_similarity(results: list[dict], out_dir: Path) -> None:
-    from src.uq.metrics import plot_reliability_diagram_sim, plot_roc_curve
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for key, title in _CONF_KEYS:
-        p = str(out_dir / f"reliability_sim_{key}.png")
-        plot_reliability_diagram_sim(results, p, confidence_key=key, title=title)
-        print(f"Reliability-sim   → {p}")
-    p = str(out_dir / "roc_sim.png")
-    plot_roc_curve(
-        results, p,
-        label_fn=lambda r: (True if r.get("similarity_rank") == "high"
-                            else False if r.get("similarity_rank") in ("low", "medium")
-                            else None),
-        title="ROC Curve — Embedding Similarity (high vs low+medium)",
-    )
-    print(f"ROC (sim)         → {p}")
-
-
-def _plot_arithmetic_correctness(results: list[dict], out_dir: Path) -> None:
-    from src.uq.metrics import plot_reliability_diagram_arith, plot_roc_curve
+def _plot_nlg_baselines(results: list[dict], out_dir: Path) -> None:
+    from src.uq.metrics import plot_reliability_diagram_rougeL, plot_roc_curve
     import math
     out_dir.mkdir(parents=True, exist_ok=True)
     for key, title in _CONF_KEYS:
-        p = str(out_dir / f"reliability_arith_{key}.png")
-        plot_reliability_diagram_arith(results, p, confidence_key=key, title=title)
-        print(f"Reliability-arith → {p}")
-    p = str(out_dir / "roc_arith.png")
+        p = str(out_dir / f"reliability_rougeL_{key}.png")
+        plot_reliability_diagram_rougeL(results, p, confidence_key=key, title=title)
+        print(f"Reliability-rougeL → {p}")
+    p = str(out_dir / "roc_rougeL.png")
     plot_roc_curve(
         results, p,
         label_fn=lambda r: (
-            r.get("arith_step_score", float("nan")) >= 0.8
-            if not math.isnan(r.get("arith_step_score", float("nan")))
+            r.get("mean_rougeL", float("nan")) >= 0.4
+            if not math.isnan(r.get("mean_rougeL", float("nan")))
             else None
         ),
-        title="ROC Curve — Arithmetic Step Correctness (score ≥ 0.8)",
+        title="ROC Curve — ROUGE-L (NLG baseline, threshold ≥ 0.4)",
     )
-    print(f"ROC (arith)       → {p}")
+    print(f"ROC (rougeL)      → {p}")
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +126,6 @@ def _plot_arithmetic_correctness(results: list[dict], out_dir: Path) -> None:
 
 def _build_mc_dropout_evaluator(args, ckpt_path: str):
     from src.uq.mc_dropout import MCDropoutConfig, MCDropoutEvaluator
-
     cfg = MCDropoutConfig(
         model_path=ckpt_path,
         base_model=args.base_model,
@@ -163,14 +147,8 @@ def main():
     ap = argparse.ArgumentParser(
         description="End-to-end UQ evaluation: download data → format → inference → metrics."
     )
-    ap.add_argument("--cluster", default="macross",
-                    choices=[
-                        "macross",
-                        "macross_8b",
-                        "fse-4a100-2-1b",
-                        "fse-4a100-2-1b-cot",
-                        "fse-4a100-2-8b",
-                    ],
+    ap.add_argument("--cluster", default="macross_1b_3090",
+                    choices=["macross_1b_3090", "macross_8b_3090"],
                     help="Cluster config — picks paths, GPU, HF cache from configs/clusters/*.yaml")
     ap.add_argument("--method", required=True, choices=["mc_dropout"])
     ap.add_argument("--test-source", default="all",
@@ -185,17 +163,14 @@ def main():
                     help="[mc_dropout] Dropout rate for the post-RMSNorm hook")
     ap.add_argument("--max-new-tokens", type=int, default=512)
     ap.add_argument("--limit", type=int, default=500,
-                    help="Max problems per test set (0 = all; for openmath_tail default 500 applies)")
+                    help="Max problems per test set (0 = all)")
     ap.add_argument("--checkpoint-step", type=int, default=None,
                     help="Use step_N checkpoint instead of final (e.g. --checkpoint-step 408000)")
     ap.add_argument("--test-sets-dir", default="",
                     help="Directory for cached test-set JSONLs. Defaults to <data_dir>/../test_sets/")
-    ap.add_argument("--prompt", default="zero_shot",
-                    choices=["zero_shot", "cot", "cot_step_by_step"],
-                    help="Prompt style: zero_shot | cot | cot_step_by_step")
-    ap.add_argument("--reference-alignment", action="store_true", default=False,
-                    help="Enrich results with reference alignment score (GSM8K only; "
-                         "requires <<expr=result>> annotations in reference_solution)")
+    ap.add_argument("--prompt", default="all",
+                    choices=["zero_shot", "cot", "cot_step_by_step", "all"],
+                    help="Prompt style — use 'all' to run all three variants sequentially")
     args = ap.parse_args()
 
     # --- Resolve cluster config ---
@@ -203,20 +178,17 @@ def main():
     paths = _resolve_paths(cluster_cfg, args.seed)
 
     os.environ["HF_HOME"] = paths["hf_cache"]
-    # Use first GPU from the cluster's device list for inference (single GPU is sufficient)
     first_gpu = os.environ.get("CUDA_VISIBLE_DEVICES")
-
     if first_gpu is None:
         first_gpu = str(paths["cuda_devices"]).split(",")[0].strip()
         os.environ["CUDA_VISIBLE_DEVICES"] = first_gpu
     print(f"Cluster : {args.cluster}")
+    print(f"Model   : {paths['model_label']}")
     print(f"GPU     : {first_gpu} (CUDA_VISIBLE_DEVICES={first_gpu})")
     print(f"HF home : {paths['hf_cache']}")
 
-    # --- Test sources ---
     sources = ["gsm8k", "math"] if args.test_source == "all" else [args.test_source]
 
-    # --- Checkpoint ---
     if args.checkpoint_step is not None:
         ckpt_path = f"{paths['output_dir']}/checkpoints/step_{args.checkpoint_step}"
     else:
@@ -224,79 +196,52 @@ def main():
     if not Path(ckpt_path).exists():
         sys.exit(f"Checkpoint not found: {ckpt_path}")
 
-    base_dir = Path(paths["base_dir"])
+    base_dir      = Path(paths["base_dir"])
     test_sets_dir = (
-        Path(args.test_sets_dir)
-        if args.test_sets_dir
+        Path(args.test_sets_dir) if args.test_sets_dir
         else Path(paths["test_sets_dir"])
     )
 
-    # --- Build prompt function ---
     from src.prompts import PROMPT_BUILDERS
-    prompt_fn = PROMPT_BUILDERS[args.prompt]
+    prompts = ["zero_shot", "cot", "cot_step_by_step"] if args.prompt == "all" else [args.prompt]
+    print(f"Prompts : {prompts}")
 
-    print(f"Prompt  : {args.prompt}")
-
-    # --- Build evaluator once (loaded outside the source loop) ---
     evaluator = _build_mc_dropout_evaluator(args, ckpt_path)
 
-    # --- Embedding similarity model (tiny — load once alongside the LLM) ---
-    from sentence_transformers import SentenceTransformer
-    from src.uq.embedding_similarity import enrich as enrich_similarity
-    print("Loading embedding model for similarity scoring ...")
-    emb_model = SentenceTransformer("all-MiniLM-L6-v2")
-
-    # --- Per-source evaluation ---
     from src.uq.test_sets import load_or_build
     from src.uq.metrics import summarise, plot_selective_prediction
 
     for source in sources:
-        print(f"\n{'='*60}")
-        print(f"Test source: {source}")
-        print(f"{'='*60}")
-
         test_set_path = test_sets_dir / f"{source}.jsonl"
         problems = load_or_build(source, test_set_path, limit=args.limit)
-        print(f"Problems: {len(problems)}")
 
-        label = f"seed{args.seed}"
-        out_dir = base_dir / "results" / args.method / label / source / args.prompt
+        for prompt in prompts:
+            print(f"\n{'='*60}")
+            print(f"Test source: {source}  |  Prompt: {prompt}")
+            print(f"{'='*60}")
+            print(f"Problems: {len(problems)}")
 
-        print(f"Running {args.method} ({args.num_passes} passes)...")
-        results = evaluator.evaluate(problems, prompt_fn=prompt_fn)
+            prompt_fn = PROMPT_BUILDERS[prompt]
+            label   = f"seed{args.seed}"
+            out_dir = base_dir / "results" / args.method / paths["model_label"] / label / source / prompt
 
-        print("Computing embedding similarity ...")
-        results = enrich_similarity(results, problems, emb_model)
+            print(f"Running {args.method} ({args.num_passes} passes)...")
+            results = evaluator.evaluate(problems, prompt_fn=prompt_fn)
 
-        if args.reference_alignment:
-            from src.uq.metrics import reference_alignment as _ref_align
-            print("Computing reference alignment ...")
-            problem_map = {p["problem"]: p for p in problems}
-            for r in results:
-                ref_sol = problem_map.get(r["problem"], {}).get("reference_solution", "")
-                r.update(_ref_align(r.get("raws", [""])[0], ref_sol or ""))
+            summary = summarise(results)
+            _write_results(results, summary, out_dir)
 
-        summary = summarise(results)
-        _write_results(results, summary, out_dir)
+            conf_dir = out_dir / "confidence"
+            conf_dir.mkdir(parents=True, exist_ok=True)
+            plot_selective_prediction(results, str(conf_dir / "selective_prediction.png"))
+            print(f"Selective    → {conf_dir / 'selective_prediction.png'}")
 
-        # confidence/ — general signal quality (not tied to a correctness definition)
-        conf_dir = out_dir / "confidence"
-        conf_dir.mkdir(parents=True, exist_ok=True)
-        plot_selective_prediction(results, str(conf_dir / "selective_prediction.png"))
-        print(f"Selective    → {conf_dir / 'selective_prediction.png'}")
+            _plot_binary_correctness(results, out_dir / "binary_correctness")
+            _plot_nlg_baselines(results, out_dir / "nlg_baselines")
 
-        # binary_correctness/ — reliability diagrams against exact answer match
-        _plot_binary_correctness(results, out_dir / "binary_correctness")
-
-        # embedding_similarity/ — reliability diagrams against embedding similarity
-        _plot_embedding_similarity(results, out_dir / "embedding_similarity")
-
-        # arithmetic_correctness/ — reliability diagrams against arith step score
-        _plot_arithmetic_correctness(results, out_dir / "arithmetic_correctness")
-
-        print(f"\n--- Summary: {source} ---")
-        for k, v in summary.items():
-            print(f"  {k}: {v}")
+            print(f"\n--- Summary: {source} / {prompt} ---")
+            for k, v in summary.items():
+                print(f"  {k}: {v}")
 
     print("\nDone.")
 
