@@ -71,13 +71,14 @@ def build_math(out_path: Path, limit: int = 0) -> list[dict]:
 
     ds = load_dataset("lighteval/MATH-Hard", split="test")
     records = []
+    from src.uq.metrics import _extract_boxed
     for ex in ds:
         sol = (ex.get("solution") or "").strip()
-        m = re.search(r"\\boxed\{([^}]+)\}", sol)
-        if not m:
+        answer = _extract_boxed(sol)
+        if answer is None:
             continue
+        answer = answer.strip()
         problem = (ex.get("problem") or "").strip()
-        answer = m.group(1).strip()
         records.append({
             "problem": problem,
             "expected_answer": answer,

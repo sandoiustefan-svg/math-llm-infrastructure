@@ -44,8 +44,27 @@ _ROC_CONF_KEYS = [
 # Math answer normalisation
 # ---------------------------------------------------------------------------
 
+def _extract_boxed(text: str) -> str | None:
+    """Extract the content of the outermost \\boxed{...}, handling nested braces."""
+    idx = text.find(r"\boxed{")
+    if idx == -1:
+        return None
+    start = idx + len(r"\boxed{")
+    depth = 1
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i]
+    return None
+
+
 def _strip_latex(s: str) -> str:
-    s = re.sub(r"\\boxed\{([^}]*)\}", r"\1", s)
+    inner = _extract_boxed(s)
+    if inner is not None:
+        s = inner
     s = re.sub(r"\\\$", "", s)   # \$ (LaTeX dollar sign) → nothing, before bare-$ strip
     s = re.sub(r"\$+", "", s)
     s = re.sub(r"\\text\{([^}]*)\}", r"\1", s)
@@ -85,7 +104,7 @@ def normalize_math_answer(s: str) -> str:
         return str(round(frac, 10)).rstrip("0").rstrip(".")
     try:
         f = float(s)
-        if f == int(f) and "e" not in s.lower():
+        if math.isfinite(f) and f == int(f) and "e" not in s.lower():
             return str(int(f))
         return str(round(f, 10)).rstrip("0").rstrip(".")
     except ValueError:
@@ -105,7 +124,8 @@ def answers_are_equal(pred: str, gold: str) -> bool:
         from sympy import sympify, simplify
         pred_expr = sympify(pred, evaluate=True)
         gold_expr = sympify(gold, evaluate=True)
-        return simplify(pred_expr - gold_expr) == 0
+        # simplify can hang on complex MATH expressions; bail out quickly
+        return simplify(pred_expr - gold_expr, rational=False) == 0
     except Exception:
         return False
 

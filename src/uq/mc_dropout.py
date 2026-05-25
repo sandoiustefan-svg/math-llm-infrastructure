@@ -82,17 +82,21 @@ class MCDropoutEvaluator:
 
     @staticmethod
     def _extract_final_answer(text: str) -> str:
-        import re
         marker = "Final Answer:"
         idx = text.find(marker)
         if idx != -1:
             lines = text[idx + len(marker):].strip().splitlines()
             return lines[0].strip() if lines else ""
-        # fallback: last \boxed{...} in the response
-        boxes = re.findall(r"\\boxed\{([^}]+)\}", text)
-        if boxes:
-            return boxes[-1].strip()
-        return ""
+        # fallback: last \boxed{...} in the response (depth-aware)
+        from src.uq.metrics import _extract_boxed
+        last, search = None, text
+        while True:
+            inner = _extract_boxed(search)
+            if inner is None:
+                break
+            last = inner
+            search = search[search.find(r"\boxed{") + 1:]
+        return last.strip() if last else ""
 
     def evaluate(self, problems: list[dict], prompt_fn=None) -> list[dict]:
         """
