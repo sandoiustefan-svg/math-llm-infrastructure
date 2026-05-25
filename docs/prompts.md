@@ -1,10 +1,15 @@
 # Prompt Formats
 
-All three prompt variants produce a list of chat messages rendered by the Llama 3
-tokenizer via `apply_chat_template`. Every variant instructs the model to annotate
-arithmetic operations inline as `<<expr=result>>` (e.g. `3 × 4 = <<3*4=12>>12`),
-making all three comparable under the same three metrics: binary correctness,
-embedding similarity, and arithmetic step correctness.
+This document covers all prompt variants used across the two phases of the experiment.
+
+**Phase 1 (exploratory, GSM8K only):** Three variants — zero_shot, cot, cot_step_by_step — all
+instructing the model to annotate arithmetic as `<<expr=result>>`. Results showed 0% annotation
+adherence for the 1B model and <3% for the 8B, because OpenMathInstruct-2 training data contains
+no such annotations. The CoT variants also introduced a multi-turn conversation structure the
+models were never fine-tuned on. See `docs/findings.md` for full analysis.
+
+**Phase 2 (primary UQ experiment, GSM8K + MATH):** A single aligned zero-shot prompt, matching
+the fine-tuning format. This is the prompt used for all results reported in the thesis.
 
 The example problem used throughout:
 
@@ -14,6 +19,53 @@ The example problem used throughout:
 > much in dollars does she make every day at the farmers' market?*
 >
 > Expected answer: **18**
+
+---
+
+---
+
+## Primary Prompt — Zero-shot Aligned (Phase 2)
+
+Matches the fine-tuning format exactly. Single system/user turn, no annotation instruction,
+no few-shot examples. This is the only prompt used for MATH evaluation and for all thesis results.
+
+**Source:** `src/prompts/zero_shot_aligned.py`
+
+**Message list**
+
+```python
+[
+    {"role": "system", "content": (
+        "You are a careful mathematical reasoning assistant. "
+        "Solve the problem step by step. "
+        "End your response with \"Final Answer: {answer}\"."
+    )},
+    {"role": "user", "content": "<problem>"},
+]
+```
+
+**Rendered prompt**
+
+```
+<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+You are a careful mathematical reasoning assistant. Solve the problem step by step. End your response with "Final Answer: {answer}".
+<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Janet's ducks lay 16 eggs per day. She eats three for breakfast every morning
+and bakes muffins for her friends every day with four. She sells the remainder
+at the farmers' market daily for $2 per fresh duck egg. How much in dollars
+does she make every day at the farmers' market?
+<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+```
+
+---
+
+## Phase 1 Variants (exploratory, GSM8K only)
+
+The following three variants were used in the exploratory phase. They are preserved
+for reference and to document what was learned from them.
 
 ---
 

@@ -169,8 +169,8 @@ def main():
     ap.add_argument("--test-sets-dir", default="",
                     help="Directory for cached test-set JSONLs. Defaults to <data_dir>/../test_sets/")
     ap.add_argument("--prompt", default="all",
-                    choices=["zero_shot", "cot", "cot_step_by_step", "all"],
-                    help="Prompt style — use 'all' to run all three variants sequentially")
+                    choices=["zero_shot", "zero_shot_aligned", "cot", "cot_step_by_step", "all"],
+                    help="Prompt style — use 'all' to run all variants sequentially")
     args = ap.parse_args()
 
     # --- Resolve cluster config ---
@@ -203,7 +203,7 @@ def main():
     )
 
     from src.prompts import PROMPT_BUILDERS
-    prompts = ["zero_shot", "cot", "cot_step_by_step"] if args.prompt == "all" else [args.prompt]
+    prompts = ["zero_shot_aligned"] if args.prompt == "all" else [args.prompt]
     print(f"Prompts : {prompts}")
 
     evaluator = _build_mc_dropout_evaluator(args, ckpt_path)
