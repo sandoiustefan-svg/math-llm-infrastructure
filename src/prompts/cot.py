@@ -2,16 +2,14 @@
 Few-shot Chain-of-Thought prompt builder.
 
 Fixed hand-written examples are prepended as user/assistant turns before the
-test problem. Assistant turns demonstrate the <<expr=result>> annotation format
-in natural prose, ending with "Final Answer: {answer}".
+test problem. Assistant turns show natural prose reasoning ending with
+"Final Answer: {answer}".
 """
 from __future__ import annotations
 
 SYSTEM_PROMPT = (
     "You are a careful mathematical reasoning assistant. "
     "Solve the problem step by step. "
-    "For every arithmetic operation write the expression and its result as "
-    "<<expr=result>> — for example, 3 × 4 = <<3*4=12>>12. "
     'End your response with "Final Answer: {answer}".'
 )
 
@@ -25,8 +23,8 @@ COT_EXAMPLES: list[dict] = [
         "solution": (
             "Let me solve this step by step.\n"
             "The store starts with 50 apples.\n"
-            "After selling 23 in the morning: 50 - 23 = <<50-23=27>>27 apples.\n"
-            "After receiving a delivery of 15: 27 + 15 = <<27+15=42>>42 apples."
+            "After selling 23 in the morning: 50 - 23 = 27 apples.\n"
+            "After receiving a delivery of 15: 27 + 15 = 42 apples."
         ),
         "answer": "42",
     },
@@ -38,8 +36,8 @@ COT_EXAMPLES: list[dict] = [
         "solution": (
             "Let me solve this step by step.\n"
             "Sarah earns $12 per hour.\n"
-            "She works 8 hours per day: 12 × 8 = <<12*8=96>>96 per day.\n"
-            "She works 5 days a week: 96 × 5 = <<96*5=480>>480 per week."
+            "She works 8 hours per day: 12 × 8 = 96 per day.\n"
+            "She works 5 days a week: 96 × 5 = 480 per week."
         ),
         "answer": "480",
     },
@@ -51,7 +49,7 @@ COT_EXAMPLES: list[dict] = [
         "solution": (
             "Let me solve this step by step.\n"
             "Convert time to hours: 2 hours 30 minutes = 2.5 hours.\n"
-            "Distance = speed × time: 60 × 2.5 = <<60*2.5=150>>150 miles."
+            "Distance = speed × time: 60 × 2.5 = 150 miles."
         ),
         "answer": "150",
     },
