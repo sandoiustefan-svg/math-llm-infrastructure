@@ -203,7 +203,7 @@ def main():
     )
 
     from src.prompts import PROMPT_BUILDERS
-    prompts = ["zero_shot_aligned"] if args.prompt == "all" else [args.prompt]
+    prompts = ["zero_shot_aligned", "cot"] if args.prompt == "all" else [args.prompt]
     print(f"Prompts : {prompts}")
 
     evaluator = _build_mc_dropout_evaluator(args, ckpt_path)
