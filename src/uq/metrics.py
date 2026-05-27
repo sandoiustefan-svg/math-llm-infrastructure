@@ -575,7 +575,7 @@ def answer_entropy(answers: list[str]) -> float:
     if n == 0:
         return 0.0
     counts = Counter(answers)
-    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+    return round(-sum((c / n) * math.log2(c / n) for c in counts.values()), 6) or 0.0
 
 
 def spearman_correlation(results: list[dict], confidence_key: str = "confidence") -> float:
@@ -894,7 +894,6 @@ def summarise(results: list[dict]) -> dict:
 
     accuracy     = sum(1 for r in labeled if r["correct"]) / n_labeled if n_labeled else float("nan")
     mean_conf    = sum(r["confidence"] for r in results) / n_total if n_total else float("nan")
-    mean_entropy = sum(r["entropy"] for r in results) / n_total if n_total else float("nan")
 
     def _mean(key: str) -> float:
         vals = [r[key] for r in results if key in r and not math.isnan(float(r.get(key, float("nan"))))]
@@ -919,8 +918,7 @@ def summarise(results: list[dict]) -> dict:
         "n_labeled":  n_labeled,
         "accuracy":   round(accuracy, 4),
 
-        "mean_answer_confidence":        round(mean_conf, 4),
-        "mean_answer_entropy":           round(mean_entropy, 4),
+        "mean_confidence":               round(mean_conf, 4),
         "mean_consistency_rate":         _mean("consistency_rate"),
         "mean_entropy":                  _mean("entropy"),
         "mean_n_unique_answers":         _mean("n_unique_answers"),
