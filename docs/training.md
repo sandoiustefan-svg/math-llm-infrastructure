@@ -18,9 +18,7 @@ Preprocessed shards (input_ids / attention_mask / loss_mask .npy)
               Meta-Llama-3.1-8B-Instruct  (4-bit NF4 quantisation)
                                 │
                           QLoRA adapters  (rank 16, all-linear)
-                                │
-                     MC dropout hook  (rate 0.1, post-LayerNorm)
-                                │
+                                │         lora_dropout=0.1 on all adapter layers
                     masked causal loss  (completion tokens only)
                                 │
                AdamW + cosine LR decay + gradient accumulation
@@ -96,29 +94,22 @@ Gradient checkpointing is enabled via `prepare_model_for_kbit_training` to keep 
 
 ## MC Dropout
 
-A single `nn.Dropout(p=0.1)` layer is injected after the final LayerNorm of the transformer stack:
+MC Dropout uses the `lora_dropout=0.1` that is already set on every LoRA adapter layer during training. No additional dropout layers or hooks are added — the same dropout that regularised training is the sole source of stochasticity at inference.
 
-```
-[transformer layers]  →  RMSNorm (final)  →  Dropout(0.1)  →  lm_head  →  logits
-```
-
-This is implemented as a PyTorch forward hook registered on `model.model.norm`. The hook intercepts the LayerNorm output and passes it through the dropout before it reaches the LM head.
-
-**During training** (`model.train()`): dropout is active — 10 % of final hidden-state activations are zeroed at each forward pass. The model learns to produce reliable predictions despite this perturbation.
+**During training** (`model.train()`): LoRA dropout is active — 10 % of adapter activations are zeroed at each forward pass. The model learns to produce reliable predictions despite this perturbation.
 
 **During validation** (`model.eval()`): dropout is automatically deactivated by PyTorch. Validation loss is measured without noise.
 
-**At inference (MC dropout UQ)**: the hook must be re-applied to the loaded checkpoint, and `model.train()` must be called to re-activate dropout. Running N stochastic forward passes then yields a distribution over outputs whose variance reflects epistemic uncertainty.
+**At inference (MC Dropout UQ)**: `model.train()` is called to re-activate the LoRA dropout. Running 20 stochastic forward passes then yields a distribution over final answers whose disagreement and variance reflect epistemic uncertainty over the adapter weights.
 
 ```python
 # Inference recipe
 model = AutoModelForCausalLM.from_pretrained(base_model, quantization_config=bnb_cfg)
 model = PeftModel.from_pretrained(model, checkpoint_path, is_trainable=False)
-_add_mc_dropout_hook(model, rate=0.1)   # re-inject the same hook
-model.train()                            # activate dropout
+model.train()   # re-activates lora_dropout=0.1 on all adapter layers
 
 samples = [model.generate(input_ids, ...) for _ in range(20)]
-# variance across samples → uncertainty estimate
+# disagreement across samples → epistemic uncertainty estimate
 ```
 
 ---
@@ -327,7 +318,6 @@ Epochs mode: 1 epochs × ... steps/epoch = ... steps
 Loading pretrained model: meta-llama/Meta-Llama-3.1-8B-Instruct
 Training mode: QLoRA 4-bit
 trainable params: 41,943,040 || all params: 8,072,884,224 || trainable%: 0.52
-MC Dropout hook added with rate=0.1
 Model parameters: 8,072,884,224 total | 41,943,040 trainable (41.94M)
 DDP: 2 GPUs
 Effective batch size: 64
@@ -347,8 +337,8 @@ When the base weights are quantised, quantisation error is present in every line
 **Why bf16 and not fp16?**
 Both precisions fit on the 3090. However, QLoRA + fp16 requires a `GradScaler` (loss scaling to prevent underflow), which introduces occasional scale-backoff events and can cause training instability. bf16 has a larger exponent range than fp16 and does not need loss scaling, making it more stable for long training runs.
 
-**Why train with MC dropout rather than adding it only at inference?**
-A model trained without dropout produces representations that are not robust to activation zeroing. Post-hoc MC dropout on such a model gives miscalibrated uncertainty — the variance across passes reflects the model's fragility under perturbation rather than genuine epistemic uncertainty. Training with the same dropout rate that is used at inference ensures the learned representations are robust to it, yielding better-calibrated uncertainty estimates.
+**Why use LoRA dropout for MC Dropout rather than adding a separate hook?**
+A separate post-hoc dropout layer applied only at inference would perturb a model that never saw that perturbation during training. The variance across passes would then reflect the model's fragility under an unfamiliar noise source rather than genuine epistemic uncertainty. Using `lora_dropout=0.1` — the same dropout that was active throughout training — is principled: the model learned its adapter weights in the presence of this stochasticity, giving a valid Bayesian approximation (Gal & Ghahramani, 2016) over the LoRA adapter weights specifically.
 
 **Why 80 / 10 / 10 shards and not examples?**
 Splitting at the shard level is simpler and deterministic — no shuffling of individual examples is needed, and the split is trivially reproducible from the shard count alone. Since shards are filled sequentially during preprocessing (examples arrive in dataset order), the split approximates a random 80/10/10 partition of the underlying examples.
