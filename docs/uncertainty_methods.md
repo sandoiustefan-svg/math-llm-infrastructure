@@ -2,124 +2,129 @@
 
 This document describes how epistemic uncertainty is estimated during inference.
 The MC Dropout evaluation loop lives in `src/uq/mc_dropout.py`; confidence
-measures are computed in `src/uq/metrics.py`.
+measures and uncertainty measures are computed in `src/uq/metrics.py`.
 
 ---
 
 ## Experiment design
 
-The evaluation is a **2 × 3 factorial design** using MC Dropout:
+The evaluation uses MC Dropout across two models and two prompt variants:
 
-| | Zero-shot | Few-shot (CoT) | Few-shot + Step-by-step |
-|---|---|---|---|
-| **Llama 3.2-1B (LoRA rank 16)** | accuracy + UQ | accuracy + UQ | accuracy + UQ |
-| **Llama 3.1-8B (LoRA rank 64)** | accuracy + UQ | accuracy + UQ | accuracy + UQ |
+| | zero_shot_aligned | cot |
+|---|---|---|
+| **Llama 3.2-1B (LoRA rank 16)** | GSM8K + MATH | GSM8K only |
+| **Llama 3.1-8B (LoRA rank 64)** | GSM8K + MATH | GSM8K only |
 
-Each cell runs on two test sets: GSM8K (in-distribution) and MATH (out-of-distribution).
-All three prompt variants instruct the model to use `<<expr=result>>` annotations,
-enabling uniform metric computation across all cells.
+`zero_shot_aligned` matches the fine-tuning format exactly (in-distribution anchor).
+`cot` uses a multi-turn few-shot structure that is intentionally out-of-distribution,
+isolating the effect of prompt-induced distribution shift on UQ reliability.
 
 ---
 
 ## MC Dropout
 
 MC Dropout re-activates the LoRA dropout (`lora_dropout=0.1`) at inference time by
-calling `model.train()`. An additional `nn.Dropout` hook is inserted after the final
-RMSNorm layer via `_add_mc_dropout_hook()`. Each of the `num_passes=20` greedy
-forward passes produces a different stochastic prediction due to the active dropout.
+calling `model.train()`. The same dropout that regularised training is reactivated —
+no additional hooks or dropout layers are added. Each of the `num_passes=20` greedy
+forward passes produces a different stochastic prediction due to the active LoRA dropout.
 
-Epistemic uncertainty is estimated from **disagreement across passes**: if all 20
-passes give the same answer the model is highly certain; if each pass gives a
-different answer the model has high epistemic uncertainty.
+This is principled because the model learned its weights in the presence of this
+dropout, giving a Bayesian approximation (Gal & Ghahramani, 2016) over the LoRA
+adapter weights specifically. Uncertainty is estimated from the adapter — the
+task-specific component — while the frozen base model knowledge is fixed.
 
----
-
-## Confidence measures
-
-Three complementary confidence signals are computed per problem, forming a progression from naive to focused:
-
-| Key in `results.json` | What it measures |
-|---|---|
-| `confidence` | Majority-vote fraction across passes — answer-level signal |
-| `full_sequence_mean_confidence` | Unweighted geometric mean token prob — baseline token-level signal |
-| `weighted_mean_confidence` | Weighted geometric mean token prob — focused token-level signal |
+Epistemic uncertainty is estimated from **disagreement and variance across passes**:
+if all 20 passes give the same answer and consistent token confidence the model is
+highly certain; if answers and confidence vary the model has high epistemic uncertainty.
 
 ---
 
-### 1. Majority-vote confidence (answer-level)
+## Confidence scores
+
+Confidence scores are in [0, 1] where higher means more confident. They are used
+for ECE (calibration) and AUROC (discrimination).
+
+### 1. Majority-vote confidence
 
 ```
 confidence = count(majority_answer) / num_passes
 ```
 
-Fraction of the 20 passes that agreed on the most common answer.
+Fraction of the 20 passes that agreed on the most common extracted final answer.
 - `confidence = 1.0` — all passes gave the same answer (certain)
 - `confidence = 0.05` — each pass gave a different answer (maximally uncertain)
 
-Captures epistemic uncertainty through *answer-level disagreement across passes*.
+Captures epistemic uncertainty through answer-level disagreement across passes.
 This is the primary UQ signal — it directly measures how consistently the model
 commits to an answer under stochastic dropout.
 
----
-
-### 2. Unweighted geometric mean token probability (token-level baseline)
+### 2. Consistency rate
 
 ```
-full_sequence_mean_confidence = exp( (1/N) * Σ log(p_i) )
+consistency_rate = Σ_a p(a)²
 ```
 
-Geometric mean over all per-token probabilities in the full generated sequence,
-averaged across all 20 MC Dropout passes. Treats every token equally regardless
-of its role in the reasoning chain.
+Sum of squared answer frequencies across 20 passes, equivalent to 1 − Gini impurity.
+Considers the full answer distribution rather than only the top answer.
+- `consistency_rate = 1.0` — all passes gave the same answer
+- `consistency_rate → 0` — passes spread uniformly across many distinct answers
 
-**Limitation**: dominated by high-frequency glue tokens ("the", "and", "therefore")
-that the model assigns near-certainty probability to regardless of whether the
-math is correct. This inflates confidence and weakens its correlation with
-correctness — included as a baseline to demonstrate this effect.
+Complements majority-vote by weighting all answer clusters, not just the plurality.
 
 ---
 
-### 3. Weighted geometric mean token probability (token-level, focused)
+## Uncertainty measures
+
+Uncertainty measures are higher when the model is more uncertain. They are used
+for AUROC only (negated for ranking — higher uncertainty = lower likelihood of correct).
+They cannot be used directly for ECE because ECE requires a confidence direction.
+
+### 3. Answer entropy
 
 ```
-weighted_mean_confidence = exp( Σ w_i * log(p_i) / Σ w_i )
-```
-
-Same geometric mean but with per-token weights that focus the signal on the
-tokens the model explicitly commits to as arithmetic facts. The weighting
-exploits the `<<expr=result>>` annotation format:
-
-| Token region | Weight |
-|---|---|
-| Tokens in `Final Answer: X` span | **25×** |
-| Result tokens inside `<<expr=result>>` | **10×** |
-| All other tokens | **1×** |
-
-Because all prompts instruct the model to annotate arithmetic inline, result
-tokens are identified precisely by regex rather than heuristic numeric detection.
-This makes the weighting more principled than detecting "numeric tokens" by
-character content.
-
-Averaged across all 20 MC Dropout passes.
-
-**Hypothesis**: by down-weighting glue tokens and up-weighting the tokens where
-arithmetic errors actually occur, this measure should correlate better with
-correctness than the unweighted baseline.
-
----
-
-### 4. Answer entropy
-
-```
-H = -Σ p(a) * log₂(p(a))
+H = -Σ_a p(a) * log₂(p(a))
 ```
 
 Shannon entropy over the answer distribution across the 20 passes.
-- `H = 0` — all passes agree
-- `H = log₂(N)` — all N passes give different answers
+- `H = 0` — all passes agree (certain)
+- `H = log₂(20) ≈ 4.32` — all 20 passes give different answers (maximally uncertain)
 
-Complements majority-vote confidence by capturing the full shape of the answer
-distribution, not just the plurality fraction. A model that splits 10/10 between
-two answers has the same `confidence = 0.5` as one that splits 10/10 between ten
-answers, but very different entropy. Reported in `summary.json` as
-`mean_answer_entropy`.
+Captures the full shape of the answer distribution. A model that splits 10/10 between
+two answers has the same majority-vote confidence (0.5) as one that gives 20 different
+answers, but very different entropy. Entropy distinguishes these cases.
+
+### 4. Number of unique answers
+
+```
+n_unique_answers = |{distinct answers across 20 passes}|
+```
+
+Raw count of distinct extracted answers. Simple and interpretable — 1 means full
+agreement, 20 means every pass gave a different answer. Cruder than entropy but
+directly interpretable without log-probability reasoning.
+
+### 5. Std of avg log-prob across passes (full sequence)
+
+```
+std_log_prob = std( avg_log_prob_1, ..., avg_log_prob_20 )
+where avg_log_prob_i = (1/L_i) * Σ_j log(p_ij)
+```
+
+Standard deviation of the per-pass average token log-probability across the 20 passes.
+Captures token-level epistemic variance: does the model's overall token confidence
+fluctuate between dropout masks? High std means the LoRA adapter weights are sensitive
+to dropout — the model is epistemically uncertain at the token level.
+
+Complements answer entropy: a model could consistently predict the same final answer
+(low entropy) but with highly variable confidence in the reasoning steps (high std_log_prob),
+revealing uncertainty in the chain of thought that answer-level signals miss.
+
+### 6. Std of numeric span avg log-prob across passes
+
+```
+std_numeric_span_log_prob = std( avg_log_prob_numeric_span_1, ..., avg_log_prob_numeric_span_20 )
+```
+
+Same as `std_log_prob` but restricted to numeric tokens within the Final Answer span.
+More focused than the full-sequence version — captures epistemic variance specifically
+in the digits the model writes as its answer, rather than the full reasoning chain.

@@ -150,9 +150,8 @@ def enrich(results: list[dict], provider: str, model: str, max_concurrent: int) 
 # ---------------------------------------------------------------------------
 
 _CONF_KEYS = [
-    ("confidence",                    "Majority Vote Confidence"),
-    ("full_sequence_mean_confidence", "Unweighted Confidence"),
-    ("weighted_mean_confidence",      "Weighted Mean Confidence"),
+    ("confidence",       "Majority Vote Confidence"),
+    ("consistency_rate", "Consistency Rate"),
 ]
 
 
@@ -194,8 +193,8 @@ def main() -> None:
     ap.add_argument("--max-concurrent", type=int, default=20,
                     help="Max simultaneous API requests (default: 20)")
     ap.add_argument("--output", default=None,
-                    help="Output path for results_judged.json. "
-                         "Defaults to <results_dir>/results_judged.json")
+                    help="Output directory for all judge outputs. "
+                         "Defaults to <results_dir>/judge_correctness/")
     ap.add_argument("--no-plots", action="store_true", default=False,
                     help="Skip plot generation")
     args = ap.parse_args()
@@ -210,21 +209,23 @@ def main() -> None:
 
     results = enrich(results, args.provider, args.model, args.max_concurrent)
 
-    out_path = Path(args.output) if args.output else results_path.parent / "results_judged.json"
+    judge_dir = Path(args.output) if args.output else results_path.parent / "judge_correctness"
+    judge_dir.mkdir(parents=True, exist_ok=True)
+
+    out_path = judge_dir / "results_judged.json"
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"Saved  → {out_path}")
 
-    # Re-run summarise to include judge metrics in summary_judged.json
     from src.uq.metrics import summarise
     summary = summarise(results)
-    summary_path = out_path.parent / "summary_judged.json"
+    summary_path = judge_dir / "summary_judged.json"
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"Summary → {summary_path}")
 
     if not args.no_plots:
-        _make_plots(results, out_path.parent / "judge_correctness")
+        _make_plots(results, judge_dir)
 
     print("\nDone.")
 

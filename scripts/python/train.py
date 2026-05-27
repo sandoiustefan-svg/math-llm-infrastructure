@@ -45,7 +45,6 @@ def main():
     ap.add_argument("--bnb-4bit-compute-dtype", default=None)
     ap.add_argument("--bnb-4bit-use-double-quant", action="store_true")
 
-    ap.add_argument("--mc-dropout-rate", type=float, default=None)
 
     ap.add_argument("--warmup-steps", type=int, default=None)
     ap.add_argument("--save-every", type=int, default=None)
@@ -89,7 +88,7 @@ def main():
         "lora_dropout": args.lora_dropout,
         "bnb_4bit_quant_type": args.bnb_4bit_quant_type,
         "bnb_4bit_compute_dtype": args.bnb_4bit_compute_dtype,
-        "mc_dropout_rate": args.mc_dropout_rate,
+
         "warmup_steps": args.warmup_steps,
         "save_every": args.save_every,
         "log_every": args.log_every,

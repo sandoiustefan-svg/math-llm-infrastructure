@@ -75,8 +75,6 @@ class TrainConfig:
     bnb_4bit_compute_dtype: str = "float16"
     bnb_4bit_use_double_quant: bool = True
 
-    mc_dropout_rate: float = 0.0
-
     seed: int = 42
     save_every: int = 500
     log_every: int = 50
@@ -156,19 +154,6 @@ def _apply_lora(model, cfg: TrainConfig):
 
     return get_peft_model(model, lora_cfg)
 
-
-def _add_mc_dropout_hook(model, rate: float) -> None:
-    dropout = nn.Dropout(p=rate)
-
-    m = model
-    if hasattr(m, "base_model"):
-        m = m.base_model.model
-
-    inner = m.model
-    dropout.to(next(inner.parameters()).device)
-
-    inner.norm.add_module("_mc_dropout", dropout)
-    inner.norm.register_forward_hook(lambda _m, _i, o: inner.norm._mc_dropout(o))
 
 
 def _lr_lambda(step: int, warmup_steps: int, total_steps: int) -> float:
@@ -803,13 +788,6 @@ def train(cfg: TrainConfig) -> None:
             device_ids=[local_rank],
             find_unused_parameters=False,
         )
-
-    if cfg.mc_dropout_rate > 0 and cfg.pretrained_model:
-        target = model.module if world_size > 1 else model
-        _add_mc_dropout_hook(target, cfg.mc_dropout_rate)
-
-        if rank == 0:
-            print(f"MC Dropout hook added with rate={cfg.mc_dropout_rate}")
 
     model.train()
 

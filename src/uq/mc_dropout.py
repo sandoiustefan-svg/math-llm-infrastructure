@@ -9,6 +9,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
 import math
+import statistics
 from src.uq.metrics import (
     answer_entropy, answers_are_equal, normalize_math_answer,
     token_probability_confidence, compute_nlg_scores,
@@ -24,7 +25,6 @@ class MCDropoutConfig:
     tokenizer_name: str
     num_passes: int = 20
     max_new_tokens: int = 512
-    mc_dropout_rate: float = 0.1
     device: str = "cuda"
 
 
@@ -32,12 +32,11 @@ class MCDropoutEvaluator:
     """
     Uncertainty quantification via Monte Carlo Dropout.
 
-    The LoRA fine-tune was trained with lora_dropout=0.1 plus an extra
-    nn.Dropout after the final RMSNorm (_add_mc_dropout_hook in trainer.py).
-    Both are re-activated by keeping the model in train() mode at inference,
-    so each greedy forward pass produces a different stochastic prediction.
+    The LoRA fine-tune was trained with lora_dropout=0.1. Keeping the model
+    in train() mode at inference re-activates those same dropout layers, so
+    each greedy forward pass produces a different stochastic prediction.
     Running num_passes passes and measuring answer disagreement gives an
-    estimate of the model's epistemic uncertainty.
+    estimate of epistemic uncertainty over the LoRA adapter weights.
     """
 
     def __init__(self, cfg: MCDropoutConfig):
@@ -136,8 +135,11 @@ class MCDropoutEvaluator:
             for a in answers:
                 counts[a] = counts.get(a, 0) + 1
             majority = max(counts, key=counts.__getitem__)
-            confidence = counts[majority] / len(answers)
+            n_answers = len(answers)
+            confidence = counts[majority] / n_answers
             entropy = answer_entropy(answers)
+            consistency_rate = sum((c / n_answers) ** 2 for c in counts.values())
+            n_unique_answers = len(counts)
 
             expected = item.get("expected_answer")
             correct: Optional[bool] = None
@@ -150,9 +152,11 @@ class MCDropoutEvaluator:
                 for raw in raws
             ]
 
-            def _avg(key):
-                vals = [c[key] for c in pass_confs if not math.isnan(c.get(key, float("nan")))]
-                return round(sum(vals) / len(vals), 6) if vals else float("nan")
+            def _std_log(key):
+                """Std of per-pass avg log-prob across passes — epistemic variance signal."""
+                vals = [math.log(c[key]) for c in pass_confs
+                        if not math.isnan(c.get(key, float("nan"))) and c.get(key, 0) > 0]
+                return round(statistics.stdev(vals), 6) if len(vals) > 1 else float("nan")
 
             # NLG scores per pass against the reference solution.
             reference = item.get("reference_solution") or ""
@@ -169,35 +173,18 @@ class MCDropoutEvaluator:
                 "raws":               raws,
                 "answers":            answers,
                 "majority_answer":    majority,
-                "confidence":         confidence,
-                "entropy":            entropy,
                 "correct":            correct,
-                # Full sequence (baseline — inflated by glue tokens)
-                "full_sequence_mean_confidence": _avg("full_sequence_mean_confidence"),
-                "full_sequence_perplexity":      _avg("full_sequence_perplexity"),
-                "full_sequence_min_token_prob":  _avg("full_sequence_min_token_prob"),
-                "full_sequence_std_token_prob":  _avg("full_sequence_std_token_prob"),
-                # Answer span only (tokens after Final Answer:)
-                "answer_span_mean_confidence":   _avg("answer_span_mean_confidence"),
-                "answer_span_perplexity":        _avg("answer_span_perplexity"),
-                "answer_span_min_token_prob":    _avg("answer_span_min_token_prob"),
-                "answer_span_std_token_prob":    _avg("answer_span_std_token_prob"),
-                # Numeric tokens — full sequence
-                "numeric_mean_confidence":       _avg("numeric_mean_confidence"),
-                "numeric_perplexity":            _avg("numeric_perplexity"),
-                "numeric_min_token_prob":        _avg("numeric_min_token_prob"),
-                "numeric_std_token_prob":        _avg("numeric_std_token_prob"),
-                # Numeric tokens — answer span only
-                "numeric_span_mean_confidence":  _avg("numeric_span_mean_confidence"),
-                "numeric_span_perplexity":       _avg("numeric_span_perplexity"),
-                "numeric_span_min_token_prob":   _avg("numeric_span_min_token_prob"),
-                "numeric_span_std_token_prob":   _avg("numeric_span_std_token_prob"),
-                # Position-weighted token probability
-                "weighted_mean_confidence":      _avg("weighted_mean_confidence"),
-                "weighted_perplexity":           _avg("weighted_perplexity"),
-                # NLG baselines
-                "mean_rougeL":   _nlg_mean("rougeL"),
-                "mean_meteor":   _nlg_mean("meteor"),
+                # Confidence scores
+                "confidence":         confidence,
+                "consistency_rate":   round(consistency_rate, 6),
+                # Uncertainty measures
+                "entropy":            entropy,
+                "n_unique_answers":   n_unique_answers,
+                "std_log_prob":       _std_log("full_sequence_mean_confidence"),
+                "std_numeric_span_log_prob": _std_log("numeric_span_mean_confidence"),
+                # NLG correctness baselines
+                "mean_rougeL":        _nlg_mean("rougeL"),
+                "mean_meteor":        _nlg_mean("meteor"),
             })
 
         return results

@@ -77,9 +77,8 @@ def _write_results(results: list[dict], summary: dict, out_dir: Path) -> None:
 
 
 _CONF_KEYS = [
-    ("confidence",                    "Majority Vote Confidence"),
-    ("full_sequence_mean_confidence", "Unweighted Confidence"),
-    ("weighted_mean_confidence",      "Weighted Mean Confidence"),
+    ("confidence",       "Majority Vote Confidence"),
+    ("consistency_rate", "Consistency Rate"),
 ]
 
 
@@ -132,7 +131,6 @@ def _build_mc_dropout_evaluator(args, ckpt_path: str):
         tokenizer_name=args.base_model,
         num_passes=args.num_passes,
         max_new_tokens=args.max_new_tokens,
-        mc_dropout_rate=args.mc_dropout_rate,
         device="cuda",
     )
     print(f"Loading MC-Dropout evaluator (adapter: {ckpt_path}) ...")
@@ -159,8 +157,7 @@ def main():
                     help="HF id of the base model (adapter is loaded on top of this)")
     ap.add_argument("--num-passes", type=int, default=20,
                     help="[mc_dropout] Number of stochastic forward passes per problem")
-    ap.add_argument("--mc-dropout-rate", type=float, default=0.1,
-                    help="[mc_dropout] Dropout rate for the post-RMSNorm hook")
+
     ap.add_argument("--max-new-tokens", type=int, default=512)
     ap.add_argument("--limit", type=int, default=500,
                     help="Max problems per test set (0 = all)")

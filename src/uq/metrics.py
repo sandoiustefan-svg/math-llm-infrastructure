@@ -34,9 +34,15 @@ _ARITH_ANNOTATION = re.compile(r'<<([^=\n]+)=([^>\n]+)>>')
 
 # Three confidence measures used across all plots and metrics.
 _ROC_CONF_KEYS = [
-    ("confidence",                    "Majority Vote"),
-    ("full_sequence_mean_confidence", "Unweighted"),
-    ("weighted_mean_confidence",      "Weighted"),
+    ("confidence",       "Majority Vote"),
+    ("consistency_rate", "Consistency Rate"),
+]
+
+_UNCERTAINTY_KEYS = [
+    ("entropy",                    "Answer Entropy"),
+    ("n_unique_answers",           "Unique Answers"),
+    ("std_log_prob",               "Std Log-Prob"),
+    ("std_numeric_span_log_prob",  "Std Numeric Span Log-Prob"),
 ]
 
 
@@ -440,6 +446,18 @@ def _auroc_from_pairs(labeled: list[tuple[float, int]]) -> float:
     return round(auc, 4)
 
 
+def auroc_uncertainty(results: list[dict], uncertainty_key: str) -> float:
+    """AUROC for an uncertainty measure — higher value means more uncertain (negated for ranking)."""
+    labeled = [
+        (-float(r[uncertainty_key]), int(bool(r["correct"])))
+        for r in results
+        if r.get("correct") is not None
+        and uncertainty_key in r
+        and not math.isnan(float(r.get(uncertainty_key, float("nan"))))
+    ]
+    return _auroc_from_pairs(labeled)
+
+
 def auroc_judge(results: list[dict], confidence_key: str = "confidence") -> float:
     """AUROC — judge_rank == 'good' as positive class (vs medium + bad)."""
     labeled = [
@@ -790,8 +808,7 @@ def plot_selective_prediction(
     """Accuracy vs coverage for all three confidence measures on one plot."""
     conf_keys = {
         "Majority-vote": "confidence",
-        "Unweighted":    "full_sequence_mean_confidence",
-        "Weighted":      "weighted_mean_confidence",
+        "Consistency Rate": "consistency_rate",
     }
     labeled = [r for r in results if r.get("correct") is not None]
     if not labeled:
@@ -886,9 +903,15 @@ def summarise(results: list[dict]) -> dict:
     oc = overconfidence_analysis(results)
 
     _conf_keys = [
-        ("confidence",                    "confidence"),
-        ("full_sequence_mean_confidence", "full_sequence"),
-        ("weighted_mean_confidence",      "weighted"),
+        ("confidence",       "confidence"),
+        ("consistency_rate", "consistency"),
+    ]
+
+    _uncertainty_keys = [
+        ("entropy",                    "entropy"),
+        ("n_unique_answers",           "n_unique"),
+        ("std_log_prob",               "std_log_prob"),
+        ("std_numeric_span_log_prob",  "std_numeric_span"),
     ]
 
     summary: dict = {
@@ -898,8 +921,11 @@ def summarise(results: list[dict]) -> dict:
 
         "mean_answer_confidence":        round(mean_conf, 4),
         "mean_answer_entropy":           round(mean_entropy, 4),
-        "mean_full_sequence_confidence": _mean("full_sequence_mean_confidence"),
-        "mean_weighted_confidence":      _mean("weighted_mean_confidence"),
+        "mean_consistency_rate":         _mean("consistency_rate"),
+        "mean_entropy":                  _mean("entropy"),
+        "mean_n_unique_answers":         _mean("n_unique_answers"),
+        "mean_std_log_prob":             _mean("std_log_prob"),
+        "mean_std_numeric_span_log_prob": _mean("std_numeric_span_log_prob"),
 
         "overconf_high_conf_correct": oc.get("high_conf_correct"),
         "overconf_high_conf_wrong":   oc.get("high_conf_wrong"),
@@ -912,6 +938,10 @@ def summarise(results: list[dict]) -> dict:
     for ck, short in _conf_keys:
         summary[f"ece_{short}"]   = expected_calibration_error(results, confidence_key=ck)
         summary[f"auroc_{short}"] = auroc(results, confidence_key=ck)
+
+    # AUROC for uncertainty measures (negated — higher uncertainty = more likely wrong)
+    for uk, short in _uncertainty_keys:
+        summary[f"auroc_{short}"] = auroc_uncertainty(results, uk)
 
     # NLG baselines aggregate
     for metric in ("rougeL", "meteor"):
