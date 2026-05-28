@@ -1,6 +1,6 @@
 # Training Pipeline
 
-This document explains every component of the training pipeline — the base model, QLoRA adaptation, data loading, loss computation, optimisation schedule, MC dropout, checkpointing, and how to launch a run.
+This document explains every component of the training pipeline — the base models, LoRA adaptation, data loading, loss computation, optimisation schedule, MC dropout, checkpointing, and how to launch a run.
 
 ---
 
@@ -15,88 +15,75 @@ Preprocessed shards (input_ids / attention_mask / loss_mask .npy)
     └─ test shards   ──→ held out → splits.json (MC-dropout inference later)
                                 │
                                 ▼
-              Meta-Llama-3.1-8B-Instruct  (4-bit NF4 quantisation)
+     Llama-3.2-1B-Instruct  /  Meta-Llama-3.1-8B-Instruct  (bf16, no quantisation)
                                 │
-                          QLoRA adapters  (rank 16, all-linear)
-                                │         lora_dropout=0.1 on all adapter layers
-                    masked causal loss  (completion tokens only)
+                     Plain LoRA adapters  (rank 16 / rank 64)
+                                │         lora_dropout=0.05 on all adapter layers
+                   masked causal loss  (completion tokens only)
                                 │
-               AdamW + cosine LR decay + gradient accumulation
+              AdamW + cosine LR decay + gradient accumulation
                                 │
-                         checkpoints/
-                           best/          ← adapter weights only
-                           step_XXXXX/    ← adapter weights + optimizer state
-                           final/         ← adapter weights + optimizer state
-                         splits.json      ← train/val/test shard index lists
-                         metrics.json
-                         training_metrics.png
+                        checkpoints/
+                          best/          ← adapter weights only
+                          step_XXXXX/    ← adapter weights + optimizer state
+                          final/         ← adapter weights + optimizer state
+                        splits.json      ← train/val/test shard index lists
+                        metrics.json
+                        training_metrics.png
 ```
 
 ---
 
-## Base Model
+## Base Models
 
-| Property | Value |
-|---|---|
-| Model ID | `meta-llama/Meta-Llama-3.1-8B-Instruct` |
-| Parameters | 8B |
-| Architecture | LLaMA-3.1 (GQA, SwiGLU, RoPE) |
-| Vocab size | 128 256 tokens |
-| Context window | 128 k (trained here with seq_len=2048) |
-| Starting point | Instruction-tuned by Meta |
+Two models were fine-tuned independently using the same pipeline:
 
-The model is loaded in **4-bit NF4** quantisation using bitsandbytes (`load_in_4bit=True`). Its base weights are frozen — no gradient flows through them. Only the LoRA adapter weights are updated.
+| Property | 1B model | 8B model |
+|---|---|---|
+| Model ID | `meta-llama/Llama-3.2-1B-Instruct` | `meta-llama/Meta-Llama-3.1-8B-Instruct` |
+| Parameters | ~1.24B | ~8.03B |
+| Architecture | LLaMA-3.2 (GQA, SwiGLU, RoPE) | LLaMA-3.1 (GQA, SwiGLU, RoPE) |
+| Context window | 128k (trained with seq_len=2048) | 128k (trained with seq_len=2048) |
+| Starting point | Instruction-tuned by Meta | Instruction-tuned by Meta |
+| Training steps | 1 100 000 | 408 000 |
 
-Using the instruct-tuned variant (rather than the base pretrain) means the chat template, role tokens, and instruction-following behaviour are already in place before fine-tuning begins. The additional training sharpens the model on mathematical reasoning without re-teaching the dialogue format.
+Both models are loaded in **bf16** — no quantisation. Base weights are frozen; only the LoRA adapter weights are updated.
+
+Using the instruct-tuned variants (rather than base pretrain) means the chat template, role tokens, and instruction-following behaviour are already in place before fine-tuning begins. The additional training sharpens the models on mathematical reasoning without re-teaching the dialogue format.
 
 ---
 
-## QLoRA Adaptation
+## LoRA Adaptation
 
-QLoRA (Quantised LoRA) combines 4-bit weight quantisation with low-rank adapter injection. This allows fine-tuning a model that would require ~16 GB at float16 using roughly ~5 GB of GPU memory.
-
-### Quantisation
-
-| Setting | Value |
-|---|---|
-| Quantisation | 4-bit NF4 (NormalFloat4) |
-| Compute dtype | `bfloat16` |
-| Double quantisation | enabled (quantises the quantisation constants, saves ~0.4 GB) |
-| Library | `bitsandbytes` |
-
-NF4 is information-theoretically optimal for normally-distributed weights. Double quantisation further reduces memory at negligible accuracy cost.
-
-### LoRA Adapters
-
-| Setting | Value |
-|---|---|
-| Target modules | `all-linear` (every `nn.Linear` in the model) |
-| Rank `r` | 16 |
-| Alpha `α` | 32 |
-| Effective scale `α/r` | 2.0 |
-| LoRA dropout | 0.05 |
-| Bias | none |
-| Trainable parameters | ~40 M (≈0.5% of total) |
-
-`target_modules="all-linear"` applies adapters to every linear layer — attention projections (`q/k/v/o_proj`), MLP projections (`gate/up/down_proj`), and the LM head. This is the recommended setting for QLoRA as the quantisation error is distributed across all linear layers.
-
-The adapter update rule for a weight matrix **W** is:
+Both models use plain LoRA (no quantisation). The adapter update rule for a weight matrix **W** is:
 
 ```
 W_effective = W_frozen + (α/r) · B · A
 ```
 
-where **A** (rank × d_in) and **B** (d_out × rank) are the trained adapter matrices, and **W_frozen** remains at 4-bit precision throughout.
+where **A** (rank × d_in) and **B** (d_out × rank) are the trained adapter matrices.
 
-Gradient checkpointing is enabled via `prepare_model_for_kbit_training` to keep activation memory bounded during backward passes.
+### Adapter configuration
+
+| Setting | 1B | 8B |
+|---|---|---|
+| Target modules | q/k/v/o_proj, gate/up/down_proj | q/k/v/o_proj, gate/up/down_proj |
+| Rank `r` | 16 | 64 |
+| Alpha `α` | 32 | 128 |
+| Effective scale `α/r` | 2.0 | 2.0 |
+| LoRA dropout | 0.05 | 0.05 |
+| Bias | none | none |
+| Trainable parameters | ~11.1M (≈0.9%) | ~167.8M (≈2.1%) |
+
+`target_modules` covers all seven linear projections in each transformer block — attention (`q/k/v/o_proj`) and MLP (`gate/up/down_proj`) — but not the embedding or LM head.
 
 ---
 
 ## MC Dropout
 
-MC Dropout uses the `lora_dropout=0.1` that is already set on every LoRA adapter layer during training. No additional dropout layers or hooks are added — the same dropout that regularised training is the sole source of stochasticity at inference.
+MC Dropout uses the `lora_dropout=0.05` that is already set on every LoRA adapter layer during training. No additional dropout layers or hooks are added — the same dropout that regularised training is the sole source of stochasticity at inference.
 
-**During training** (`model.train()`): LoRA dropout is active — 10 % of adapter activations are zeroed at each forward pass. The model learns to produce reliable predictions despite this perturbation.
+**During training** (`model.train()`): LoRA dropout is active — 5% of adapter activations are zeroed at each forward pass. The model learns to produce reliable predictions despite this perturbation.
 
 **During validation** (`model.eval()`): dropout is automatically deactivated by PyTorch. Validation loss is measured without noise.
 
@@ -104,9 +91,9 @@ MC Dropout uses the `lora_dropout=0.1` that is already set on every LoRA adapter
 
 ```python
 # Inference recipe
-model = AutoModelForCausalLM.from_pretrained(base_model, quantization_config=bnb_cfg)
+model = AutoModelForCausalLM.from_pretrained(base_model, torch_dtype=torch.bfloat16)
 model = PeftModel.from_pretrained(model, checkpoint_path, is_trainable=False)
-model.train()   # re-activates lora_dropout=0.1 on all adapter layers
+model.train()   # re-activates lora_dropout=0.05 on all adapter layers
 
 samples = [model.generate(input_ids, ...) for _ in range(20)]
 # disagreement across samples → epistemic uncertainty estimate
@@ -185,17 +172,17 @@ This means the model only learns to predict the assistant's mathematical reasoni
 
 ## Optimisation
 
-| Setting | Value |
-|---|---|
-| Optimiser | AdamW |
-| Learning rate | 2 × 10⁻⁴ |
-| LR schedule | Linear warmup → cosine decay |
-| Warmup steps | 3 000 |
-| Gradient accumulation | 32 micro-steps |
-| Effective batch size | 1 × 32 × 2 GPUs = **64** |
-| Gradient clipping | max norm 1.0 |
-| Precision | bf16 (AMP autocast) |
-| Epochs | 1 (over 80% of shards) |
+| Setting | 1B | 8B |
+|---|---|---|
+| Optimiser | AdamW | AdamW |
+| Learning rate | 2 × 10⁻⁴ | 2 × 10⁻⁴ |
+| LR schedule | Linear warmup → cosine decay | Linear warmup → cosine decay |
+| Warmup steps | 1 000 | 3 000 |
+| Gradient accumulation | 32 micro-steps | 32 micro-steps |
+| Effective batch size | 1 × 32 × 2 GPUs = **64** | 1 × 32 × 2 GPUs = **64** |
+| Gradient clipping | max norm 1.0 | max norm 1.0 |
+| Precision | bf16 (AMP autocast) | bf16 (AMP autocast) |
+| Training steps | 1 100 000 | 408 000 |
 
 The LR schedule:
 
@@ -247,7 +234,7 @@ checkpoints/
     training_state.pt
 ```
 
-Only adapter weights are saved via `model.save_pretrained` — the 4-bit base model is not written to disk (it is always re-loaded from HuggingFace at inference time). The `training_state.pt` stores the optimizer state dict, current step, all metrics, and experiment ID for resuming.
+Only adapter weights are saved via `model.save_pretrained` — the base model is not written to disk (it is always re-loaded from HuggingFace at inference time). The `training_state.pt` stores the optimizer state dict, current step, all metrics, and experiment ID for resuming.
 
 Old checkpoints are pruned: only the two most recent step checkpoints are kept on disk at any time. The `best/` directory is updated whenever a new lowest validation loss (or, if no validation was run, lowest average training loss) is achieved.
 
@@ -280,19 +267,16 @@ The registry provides a searchable audit trail of all experiments without openin
 ### Prerequisites
 
 1. Preprocessing complete: `data/processed/openmathinstruct2/shards/manifest.json` exists.
-2. Shard counts computed and filled into `configs/llama3_8b_qlora.yaml`:
-   ```bash
-   T=$(ls $DATA_DIR/input_ids_*.npy | wc -l)
-   # set val_shard_count = T/10, test_shard_count = T/10 in the yaml
-   ```
-3. HuggingFace token available: `huggingface-cli login` (gated model).
+2. HuggingFace token available: `huggingface-cli login` (gated model).
 
 ### Launch
 
 ```bash
-# From the repo root on macross:
-bash scripts/bash/train.sh configs/llama3_8b_qlora.yaml 42
-#                                                        └── seed
+# 1B model, seed 42
+bash scripts/bash/train.sh configs/llama3_1b_lora.yaml 42
+
+# 8B model, seed 42
+bash scripts/bash/train.sh configs/llama3_8b_lora.yaml 42
 ```
 
 `train.sh` will:
@@ -305,40 +289,38 @@ bash scripts/bash/train.sh configs/llama3_8b_qlora.yaml 42
 ```
 ============================================================
  TRAIN CONFIG
-  config     : configs/llama3_8b_qlora.yaml
+  config     : configs/llama3_1b_lora.yaml
   seed       : 42
   ...
 ============================================================
-  Splits saved → outputs/qlora_8b_seed42/splits.json
+  Splits saved → outputs/lora_1b_seed42/splits.json
   Experiment registered → exp_XXXXXXXX
 Data mode: DISK shards from .../shards
-Total shards: 6840
+Total shards: 13646
 Train shards: 10918 | Val shards: 1364 | Test shards: 1364 (held out)
-Epochs mode: 1 epochs × ... steps/epoch = ... steps
-Loading pretrained model: meta-llama/Meta-Llama-3.1-8B-Instruct
-Training mode: QLoRA 4-bit
-trainable params: 41,943,040 || all params: 8,072,884,224 || trainable%: 0.52
-Model parameters: 8,072,884,224 total | 41,943,040 trainable (41.94M)
+Loading pretrained model: meta-llama/Llama-3.2-1B-Instruct
+Training mode: LoRA (plain, bf16)
+trainable params: 11,141,120 || all params: 1,235,814,400 || trainable%: 0.90
 DDP: 2 GPUs
 Effective batch size: 64
-Step      0/...... | Loss 2.3412 | LR 6.67e-08 | Tok/s ... | ...
+Step      0/1100000 | Loss 2.3412 | LR 6.67e-08 | Tok/s ... | ...
 ```
 
 ---
 
 ## Design Decisions
 
-**Why QLoRA instead of full fine-tuning?**
-Full fine-tuning of an 8B model at bf16 requires ~16 GB per GPU just for parameters, plus optimiser states (~48 GB for AdamW). Two 3090s (48 GB combined) cannot hold this. QLoRA reduces the base model to ~5 GB and adds only ~160 MB of adapter weights, fitting comfortably with room for activations and gradient accumulation.
+**Why plain LoRA instead of QLoRA?**
+Both the 1B and 8B models fit comfortably in bf16 on 2×RTX 3090 (48 GB combined). The 1B uses ~2.5 GB at bf16; the 8B uses ~16 GB. Plain LoRA avoids the bitsandbytes quantisation overhead and the associated compute-dtype conversion on every forward pass, giving cleaner gradients and simpler reproducibility.
 
-**Why `all-linear` target modules for QLoRA?**
-When the base weights are quantised, quantisation error is present in every linear layer — not just the attention projections. Adapting only attention while leaving MLP layers unadapted means the MLP quantisation error is never corrected. `all-linear` addresses this across the full model.
+**Why different ranks for 1B and 8B?**
+The 8B model has ~6.5× more parameters and deeper representations. Rank 64 gives the 8B adapter ~167M trainable parameters (~2.1% of total), keeping the trainable fraction comparable across the two models and giving the larger model sufficient capacity to adapt. Rank 16 for the 1B gives ~11M trainable parameters (~0.9%).
 
 **Why bf16 and not fp16?**
-Both precisions fit on the 3090. However, QLoRA + fp16 requires a `GradScaler` (loss scaling to prevent underflow), which introduces occasional scale-backoff events and can cause training instability. bf16 has a larger exponent range than fp16 and does not need loss scaling, making it more stable for long training runs.
+Both precisions fit on the 3090. However, fp16 requires a `GradScaler` (loss scaling to prevent underflow), which introduces occasional scale-backoff events and can cause training instability. bf16 has a larger exponent range than fp16 and does not need loss scaling, making it more stable for long training runs.
 
 **Why use LoRA dropout for MC Dropout rather than adding a separate hook?**
-A separate post-hoc dropout layer applied only at inference would perturb a model that never saw that perturbation during training. The variance across passes would then reflect the model's fragility under an unfamiliar noise source rather than genuine epistemic uncertainty. Using `lora_dropout=0.1` — the same dropout that was active throughout training — is principled: the model learned its adapter weights in the presence of this stochasticity, giving a valid Bayesian approximation (Gal & Ghahramani, 2016) over the LoRA adapter weights specifically.
+A separate post-hoc dropout layer applied only at inference would perturb a model that never saw that perturbation during training. The variance across passes would then reflect the model's fragility under an unfamiliar noise source rather than genuine epistemic uncertainty. Using `lora_dropout=0.05` — the same dropout that was active throughout training — is principled: the model learned its adapter weights in the presence of this stochasticity, giving a valid Bayesian approximation (Gal & Ghahramani, 2016) over the LoRA adapter weights specifically.
 
 **Why 80 / 10 / 10 shards and not examples?**
 Splitting at the shard level is simpler and deterministic — no shuffling of individual examples is needed, and the split is trivially reproducible from the shard count alone. Since shards are filled sequentially during preprocessing (examples arrive in dataset order), the split approximates a random 80/10/10 partition of the underlying examples.

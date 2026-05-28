@@ -23,7 +23,7 @@ isolating the effect of prompt-induced distribution shift on UQ reliability.
 
 ## MC Dropout
 
-MC Dropout re-activates the LoRA dropout (`lora_dropout=0.1`) at inference time by
+MC Dropout re-activates the LoRA dropout (`lora_dropout=0.05`) at inference time by
 calling `model.train()`. The same dropout that regularised training is reactivated —
 no additional hooks or dropout layers are added. Each of the `num_passes=20` greedy
 forward passes produces a different stochastic prediction due to the active LoRA dropout.

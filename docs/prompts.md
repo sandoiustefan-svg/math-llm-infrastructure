@@ -8,8 +8,11 @@ adherence for the 1B model and <3% for the 8B, because OpenMathInstruct-2 traini
 no such annotations. The CoT variants also introduced a multi-turn conversation structure the
 models were never fine-tuned on. See `docs/findings.md` for full analysis.
 
-**Phase 2 (primary UQ experiment, GSM8K + MATH):** A single aligned zero-shot prompt, matching
-the fine-tuning format. This is the prompt used for all results reported in the thesis.
+**Phase 2 (primary UQ experiment, GSM8K + MATH):** Two prompts — `zero_shot_aligned` (in-distribution
+anchor, single-turn, matches fine-tuning format) and `cot` (multi-turn few-shot, intentionally
+out-of-distribution to isolate the effect of prompt-induced distribution shift on calibration).
+The `<<expr=result>>` annotation instruction has been removed from the cot prompt; examples now
+use plain arithmetic. `zero_shot_aligned` runs on GSM8K + MATH; `cot` runs on GSM8K only.
 
 The example problem used throughout:
 
@@ -110,7 +113,9 @@ does she make every day at the farmers' market?
 ## Variant 2 — Few-shot (CoT)
 
 Three fixed hand-written examples are prepended as `user`/`assistant` turns.
-The assistant turns demonstrate the `<<expr=result>>` format in natural prose.
+The assistant turns show natural prose reasoning — no `<<expr=result>>` annotations.
+
+**Source:** `src/prompts/cot.py`
 
 **Message list**
 
@@ -119,8 +124,6 @@ The assistant turns demonstrate the `<<expr=result>>` format in natural prose.
     {"role": "system", "content": (
         "You are a careful mathematical reasoning assistant. "
         "Solve the problem step by step. "
-        "For every arithmetic operation write the expression and its result as "
-        "<<expr=result>> — for example, 3 × 4 = <<3*4=12>>12. "
         "End your response with \"Final Answer: {answer}\"."
     )},
     # --- example 1 ---
@@ -128,8 +131,8 @@ The assistant turns demonstrate the `<<expr=result>>` format in natural prose.
     {"role": "assistant", "content": (
         "Let me solve this step by step.\n"
         "The store starts with 50 apples.\n"
-        "After selling 23 in the morning: 50 - 23 = <<50-23=27>>27 apples.\n"
-        "After receiving a delivery of 15: 27 + 15 = <<27+15=42>>42 apples.\n\n"
+        "After selling 23 in the morning: 50 - 23 = 27 apples.\n"
+        "After receiving a delivery of 15: 27 + 15 = 42 apples.\n\n"
         "Final Answer: 42"
     )},
     # --- example 2 ---
@@ -137,8 +140,8 @@ The assistant turns demonstrate the `<<expr=result>>` format in natural prose.
     {"role": "assistant", "content": (
         "Let me solve this step by step.\n"
         "Sarah earns $12 per hour.\n"
-        "She works 8 hours per day: 12 × 8 = <<12*8=96>>96 per day.\n"
-        "She works 5 days a week: 96 × 5 = <<96*5=480>>480 per week.\n\n"
+        "She works 8 hours per day: 12 × 8 = 96 per day.\n"
+        "She works 5 days a week: 96 × 5 = 480 per week.\n\n"
         "Final Answer: 480"
     )},
     # --- example 3 ---
@@ -146,7 +149,7 @@ The assistant turns demonstrate the `<<expr=result>>` format in natural prose.
     {"role": "assistant", "content": (
         "Let me solve this step by step.\n"
         "Convert time to hours: 2 hours 30 minutes = 2.5 hours.\n"
-        "Distance = speed × time: 60 × 2.5 = <<60*2.5=150>>150 miles.\n\n"
+        "Distance = speed × time: 60 × 2.5 = 150 miles.\n\n"
         "Final Answer: 150"
     )},
     # --- test problem ---
@@ -208,10 +211,10 @@ reinforces numbered steps.
 | | Zero-shot | Few-shot (CoT) | Few-shot + Step-by-step |
 |---|---|---|---|
 | Few-shot examples | none | 3 fixed | 3 fixed |
-| `<<expr=result>>` format | instruction only | instruction + examples | instruction + examples |
+| `<<expr=result>>` format | none | none | none |
 | Step labels (`Step N:`) | none | none | explicit |
-| Prompt length | shortest | medium (~500 tokens) | medium (~500 tokens) |
-| Expected benefit | baseline | format adherence | structured decomposition |
+| Prompt length | shortest | medium (~400 tokens) | medium (~400 tokens) |
+| Outcome | best accuracy + calibration | OOD multi-turn structure | OOD multi-turn structure |
 
 All three variants are evaluated under the same metrics:
-binary correctness, LLM-as-judge rank, and NLG baselines (BLEU / ROUGE / METEOR).
+binary correctness, LLM-as-judge rank, and NLG baselines (ROUGE-L / METEOR).
