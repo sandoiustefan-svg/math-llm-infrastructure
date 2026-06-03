@@ -90,8 +90,8 @@ python scripts/python/inspect_data.py --limit 3
 
 Both use plain LoRA (no quantisation). LoRA adapts 7 modules per layer:
 `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`.
-`lora_dropout=0.1` is set on all adapter layers — this is the sole stochasticity
-source for MC Dropout at inference.
+`lora_dropout=0.05` is set on all adapter layers — this is the sole stochasticity
+source for MC Dropout at inference. No additional hooks are added.
 
 ### Data split
 
@@ -106,10 +106,10 @@ total shards T  (13 646 for full OpenMathInstruct-2)
 
 ```bash
 # 1B model, seed 42
-bash scripts/bash/train.sh configs/clusters/macross_1b_3090.yaml 42
+bash scripts/bash/train.sh configs/llama3_1b_lora.yaml 42
 
 # 8B model, seed 42
-bash scripts/bash/train.sh configs/clusters/macross_8b_3090.yaml 42
+bash scripts/bash/train.sh configs/llama3_8b_lora.yaml 42
 ```
 
 ---
@@ -118,9 +118,8 @@ bash scripts/bash/train.sh configs/clusters/macross_8b_3090.yaml 42
 
 ### Method — MC Dropout
 
-`lora_dropout=0.1` is active on all adapter layers during training and reactivated
-at inference via `model.train()`. No additional dropout hooks are added — the same
-dropout that regularised training is the sole source of stochasticity. Running
+`lora_dropout=0.05` is active on all adapter layers during training and reactivated
+at inference via `model.train()` — no additional hooks are added. Running
 **N=20 greedy forward passes** per problem yields a distribution over answers;
 disagreement and variance across passes estimate epistemic uncertainty over the
 LoRA adapter weights.

@@ -27,8 +27,8 @@ bash scripts/bash/preprocess.sh --debug  # 30 examples, seq_len=512
 
 ### Train (cluster config drives everything)
 ```bash
-bash scripts/bash/train.sh configs/clusters/macross.yaml 42   # seed=42
-bash scripts/bash/train.sh configs/clusters/macross_8b.yaml 123
+bash scripts/bash/train.sh configs/llama3_1b_lora.yaml 42    # seed=42
+bash scripts/bash/train.sh configs/llama3_8b_lora.yaml 123
 ```
 
 ### UQ Evaluation
@@ -72,15 +72,15 @@ OpenMathInstruct-2 (HuggingFace)
 
 **Strategy 3 formatting**: Each example is `Problem + Solution + Final Answer`. Loss masking ensures only completion tokens (solution + answer) contribute — prompts are masked out.
 
-**LoRA fine-tuning**: Primary training mode. Plain LoRA for 1B (fits in bf16), QLoRA for 8B (4-bit NF4). `lora_dropout=0.1` is set intentionally to enable MC Dropout at inference — the same dropout that regularises training is re-activated (via `model.train()`) during MC Dropout evaluation.
+**LoRA fine-tuning**: Primary training mode. Both 1B and 8B use plain LoRA (no quantisation, both fit in bf16). `lora_dropout=0.05` is set on all adapter layers — this dropout is reactivated via `model.train()` at inference to enable MC Dropout.
 
-**MC Dropout inference**: `model.train()` at inference time re-activates the LoRA dropout. An additional `nn.Dropout` hook is inserted after the final RMSNorm via `_add_mc_dropout_hook()`. Each of `num_passes` greedy forward passes produces a different stochastic prediction; answer disagreement estimates epistemic uncertainty.
+**MC Dropout inference**: `model.train()` at inference time re-activates the LoRA dropout (`lora_dropout=0.05`) — this is the sole source of stochasticity. No additional hooks are added. Each of `num_passes` greedy forward passes produces a different stochastic prediction; answer disagreement estimates epistemic uncertainty.
 
 **Deep Ensembles**: Multiple LoRA adapters trained from different seeds loaded sequentially (to avoid multiplying VRAM by K). Uncertainty from inter-model disagreement is complementary to MC Dropout.
 
 **UQ metrics**: Six confidence measures are computed per problem — full-sequence, answer-span, numeric-only, numeric-span, position-weighted, and majority-vote fraction — each reported with mean confidence, perplexity, min token prob, and std token prob. ECE and reliability diagrams are produced for all six.
 
-**Cluster config pattern**: `configs/clusters/<cluster>.yaml` holds all hardware and path settings. `train.sh` and `run_uq_eval.py` read the same YAML, keeping paths consistent between training and eval.
+**Config split**: Training uses `configs/llama3_{1b,8b}_lora.yaml` (full hyperparams: LoRA, optimiser, scheduler, validation). Inference uses `configs/clusters/macross_{1b,8b}_3090.yaml` (hardware and paths only, plus `test_sets_dir`). The two configs share `output_dir` so checkpoints written during training are found by the evaluator.
 
 **Experiment registry**: `experiments/registry.json` is a lightweight JSON log of all runs. `ExperimentRegistry` is called automatically from `trainer.py` at start and completion of each run.
 
@@ -107,7 +107,7 @@ OpenMathInstruct-2 (HuggingFace)
 
 ### Cluster Configs (`configs/clusters/`)
 
-Each YAML specifies hardware (cuda_devices, n_gpus), paths (base_dir, data_dir, output_dir, hf_cache), and full training hyperparams. Available configs: `macross.yaml` (1B LoRA, 2× RTX 3090), `macross_8b.yaml` (8B QLoRA), `a100-1/2/3.yaml`.
+Inference-only configs: hardware (cuda_devices, n_gpus), paths (base_dir, data_dir, output_dir, hf_cache, test_sets_dir). Available: `macross_1b_3090.yaml` (1B, GPU 1), `macross_8b_3090.yaml` (8B, GPU 0). Training hyperparams live in `configs/llama3_{1b,8b}_lora.yaml`.
 
 The `output_dir` in a cluster config is a base; `train.sh` appends `_seed{N}` to produce the per-seed output directory (e.g., `outputs/lora_1b_seed42/`).
 

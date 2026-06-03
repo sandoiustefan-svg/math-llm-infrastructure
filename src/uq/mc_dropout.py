@@ -32,7 +32,7 @@ class MCDropoutEvaluator:
     """
     Uncertainty quantification via Monte Carlo Dropout.
 
-    The LoRA fine-tune was trained with lora_dropout=0.1. Keeping the model
+    The LoRA fine-tune was trained with lora_dropout=0.05. Keeping the model
     in train() mode at inference re-activates those same dropout layers, so
     each greedy forward pass produces a different stochastic prediction.
     Running num_passes passes and measuring answer disagreement gives an
