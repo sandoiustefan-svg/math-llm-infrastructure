@@ -27,6 +27,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -59,38 +60,60 @@ _JUDGE_USER = "Problem:\n{problem}\n\nModel response:\n{response}"
 # ---------------------------------------------------------------------------
 
 async def _call_openai(client, model: str, problem: str, response: str, sem: asyncio.Semaphore) -> str:
-    async with sem:
-        try:
-            result = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": _JUDGE_SYSTEM},
-                    {"role": "user",   "content": _JUDGE_USER.format(problem=problem, response=response)},
-                ],
-                max_tokens=5,
-                temperature=0,
-            )
-            label = result.choices[0].message.content.strip().lower()
-            return label if label in _VALID_LABELS else "bad"
-        except Exception as e:
-            print(f"  [judge error] {e}")
-            return "bad"
+    for attempt in range(8):
+        rate_limited = False
+        async with sem:
+            try:
+                result = await client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": _JUDGE_SYSTEM},
+                        {"role": "user",   "content": _JUDGE_USER.format(problem=problem, response=response)},
+                    ],
+                    max_tokens=5,
+                    temperature=0,
+                )
+                label = result.choices[0].message.content.strip().lower()
+                return label if label in _VALID_LABELS else "bad"
+            except Exception as e:
+                msg = str(e)
+                if "429" in msg or "rate_limit" in msg or "quota" in msg:
+                    rate_limited = True
+                else:
+                    print(f"  [judge error] {e}")
+                    return "bad"
+        # semaphore is released here before sleeping
+        if rate_limited:
+            await asyncio.sleep(2 ** attempt)
+    print(f"  [judge error] max retries exceeded")
+    return "bad"
 
 
 async def _call_anthropic(client, model: str, problem: str, response: str, sem: asyncio.Semaphore) -> str:
-    async with sem:
-        try:
-            result = await client.messages.create(
-                model=model,
-                max_tokens=5,
-                system=_JUDGE_SYSTEM,
-                messages=[{"role": "user", "content": _JUDGE_USER.format(problem=problem, response=response)}],
-            )
-            label = result.content[0].text.strip().lower()
-            return label if label in _VALID_LABELS else "bad"
-        except Exception as e:
-            print(f"  [judge error] {e}")
-            return "bad"
+    for attempt in range(8):
+        rate_limited = False
+        async with sem:
+            try:
+                result = await client.messages.create(
+                    model=model,
+                    max_tokens=5,
+                    system=_JUDGE_SYSTEM,
+                    messages=[{"role": "user", "content": _JUDGE_USER.format(problem=problem, response=response)}],
+                )
+                label = result.content[0].text.strip().lower()
+                return label if label in _VALID_LABELS else "bad"
+            except Exception as e:
+                msg = str(e)
+                if "429" in msg or "rate_limit" in msg or "overloaded" in msg:
+                    rate_limited = True
+                else:
+                    print(f"  [judge error] {e}")
+                    return "bad"
+        # semaphore is released here before sleeping
+        if rate_limited:
+            await asyncio.sleep(2 ** attempt)
+    print(f"  [judge error] max retries exceeded")
+    return "bad"
 
 
 async def _run_all(

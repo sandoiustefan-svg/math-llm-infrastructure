@@ -396,3 +396,153 @@ gracefully rather than catastrophically.
   aggregate metrics. Estimated cost: ~$0.80 per 500-problem run with Claude Haiku 4.5.
 - **Additional seeds:** Only seed 42 has been evaluated. Running seeds 123 and 456
   would enable ensemble comparison and provide error bars on the reported metrics.
+
+---
+
+## Thesis Results Section — Plots and Inline Numbers
+
+Note: LLM-as-judge has not been run. All plots and numbers below are from binary
+correctness only. Judge ECE/AUROC columns are placeholders pending that run.
+
+---
+
+### Plots (4 figures, 9 panels total)
+
+**Figure 1 — Reliability diagrams: scale and dataset difficulty (2×2)**
+
+Rows = dataset (GSM8K / MATH), Cols = model (1B / 8B). All `zero_shot_aligned`.
+Use `binary_correctness/reliability_confidence.png` (majority-vote) for all panels.
+
+| Panel | File | ECE |
+|---|---|---|
+| GSM8K / 1B | `1b/seed42/gsm8k/zero_shot_aligned/binary_correctness/reliability_confidence.png` | 0.123 |
+| GSM8K / 8B | `8b/seed42/gsm8k/zero_shot_aligned/binary_correctness/reliability_confidence.png` | 0.040 |
+| MATH / 1B  | `1b/seed42/math/zero_shot_aligned/binary_correctness/reliability_confidence.png`  | 0.297 |
+| MATH / 8B  | `8b/seed42/math/zero_shot_aligned/binary_correctness/reliability_confidence.png`  | 0.255 |
+
+This is the central calibration figure. Shows the scale effect (1B→8B ECE halves on
+GSM8K) and the task-difficulty collapse (ECE triples on MATH for both models).
+
+---
+
+**Figure 2 — Reliability diagrams: prompt distribution shift (1×2)**
+
+1B model only, GSM8K only. Left = `zero_shot_aligned`, right = `cot`.
+Use `binary_correctness/reliability_confidence.png`.
+
+| Panel | File | ECE |
+|---|---|---|
+| 1B GSM8K zero_shot | `1b/seed42/gsm8k/zero_shot_aligned/binary_correctness/reliability_confidence.png` | 0.123 |
+| 1B GSM8K cot       | `1b/seed42/gsm8k/cot/binary_correctness/reliability_confidence.png`               | 0.179 |
+
+The 8B is not worth a panel here — ECE is 0.040 vs 0.038, visually indistinguishable.
+The 1B shows the calibration degradation clearly (+0.056 ECE under OOD prompting).
+
+---
+
+**Figure 3 — ROC curves: best case vs degraded regime (1×2)**
+
+Each panel is `binary_correctness/roc_binary.png` — both confidence measures overlaid.
+
+| Panel | File | AUROC conf / consistency |
+|---|---|---|
+| Best case: 8B GSM8K zero_shot    | `8b/seed42/gsm8k/zero_shot_aligned/binary_correctness/roc_binary.png` | 0.858 / 0.857 |
+| Degraded: 1B MATH zero_shot      | `1b/seed42/math/zero_shot_aligned/binary_correctness/roc_binary.png`  | 0.569 / 0.588 |
+
+Shows the full range: strong discrimination under tractable conditions, near-random
+under task collapse (1B MATH). Use these two panels rather than all 8 ROC plots.
+
+---
+
+**Figure 4 — Selective prediction (1 panel)**
+
+`8b/seed42/gsm8k/zero_shot_aligned/confidence/selective_prediction.png`
+
+Shows accuracy vs coverage for the best-case condition. Makes the practical utility
+argument: abstaining on low-confidence predictions substantially raises accuracy on
+the accepted subset.
+
+---
+
+### Inline numbers (tables for the thesis)
+
+All paths are relative to `results/results_mc_dropout_1/`.
+
+**Table 1 — Accuracy and overconfidence**
+
+| Model | Dataset | Prompt | Accuracy | Mean conf | Mean entropy | Overconf rate |
+|-------|---------|--------|----------|-----------|--------------|---------------|
+| 8B | GSM8K | zero_shot | 58.6% | 0.564 | 1.906 | 4.9% |
+| 8B | GSM8K | cot | 56.8% | 0.538 | 1.977 | 6.2% |
+| 1B | GSM8K | zero_shot | 40.2% | 0.525 | 2.030 | 22.3% |
+| 1B | GSM8K | cot | 34.2% | 0.521 | 2.025 | 23.6% |
+| 8B | MATH | zero_shot | 2.2% | 0.277 | 3.191 | **100.0%** |
+| 8B | MATH | cot | 4.2% | 0.305 | 3.055 | 50.0% |
+| 1B | MATH | zero_shot | 4.2% | 0.336 | 2.983 | 94.1% |
+| 1B | MATH | cot | 4.0% | 0.374 | 2.817 | 75.0% |
+
+Key callout: 8B MATH `zero_shot_aligned` — mean confidence 0.277 yet overconf rate
+100% (4 high-confidence predictions, all wrong). Model is uncertain on average but
+catastrophically overconfident in the rare cases it commits.
+
+---
+
+**Table 2 — Calibration (ECE)**
+
+| Model | Dataset | Prompt | ECE conf | ECE consistency |
+|-------|---------|--------|----------|-----------------|
+| 8B | GSM8K | zero_shot | **0.040** | 0.132 |
+| 8B | GSM8K | cot | **0.038** | 0.138 |
+| 1B | GSM8K | zero_shot | 0.123 | **0.075** |
+| 1B | GSM8K | cot | 0.179 | **0.071** |
+| 8B | MATH | zero_shot | 0.255 | **0.138** |
+| 8B | MATH | cot | 0.263 | **0.142** |
+| 1B | MATH | zero_shot | 0.297 | **0.165** |
+| 1B | MATH | cot | 0.334 | **0.193** |
+
+Bold = better-calibrated score for each condition. Direction flips between models:
+consistency rate wins for the 1B (and all MATH conditions); majority-vote wins for 8B on GSM8K.
+
+---
+
+**Table 3 — Discrimination (AUROC)**
+
+Confidence measures only — answers the question: does the model's confidence correctly
+rank problems it gets right above problems it gets wrong?
+
+| Model | Dataset | Prompt | AUROC conf | AUROC consistency |
+|-------|---------|--------|------------|-------------------|
+| 8B | GSM8K | zero_shot | **0.858** | 0.857 |
+| 8B | GSM8K | cot | **0.846** | 0.839 |
+| 1B | GSM8K | cot | 0.817 | **0.823** |
+| 1B | GSM8K | zero_shot | 0.810 | 0.810 |
+| 1B | MATH | cot | 0.696 | **0.720** |
+| 8B | MATH | zero_shot | 0.696 | **0.724** |
+| 8B | MATH | cot | 0.628 | **0.664** |
+| 1B | MATH | zero_shot | 0.569 | **0.588** |
+
+Both measures discriminate nearly identically — choosing between them matters only
+for calibration (Table 2), not discrimination.
+
+---
+
+### What to mention in text but not table
+
+- `auroc_entropy`: 0.810–0.851 on GSM8K, 0.599–0.747 on MATH — closely tracks the
+  confidence AUROC in every condition, confirming answer-level signals carry the same
+  discriminative information.
+- `auroc_std_numeric_span`: on MATH outperforms or matches entropy for 1B (0.673–0.757
+  vs 0.599–0.747) — token-level variance in the Final Answer digits is the most robust
+  signal when the answer distribution saturates (~12 unique answers per problem).
+- `auroc_std_log_prob`: weak for 8B (0.483–0.540 on GSM8K) because long confident
+  reasoning chains suppress dropout variance; competitive for 1B (0.704–0.721).
+- `auroc_n_unique`: best single discriminator on MATH in 3/4 conditions (0.622–0.776)
+  because simple counts are robust to answer-extraction noise at ~4% accuracy; entropy's
+  log weighting amplifies noise at very low base rates.
+- ROUGE-L / METEOR: mean values 0.14–0.26 across conditions, clearly below the accuracy
+  floor on GSM8K. The 8B MATH `zero_shot_aligned` inversion (`auroc_rougeL` = 0.072)
+  is a degenerate case from near-zero ROUGE-L variance — cite as evidence the metric
+  is unsuitable for symbolic math.
+- `mean_std_numeric_span_log_prob` rises from ~0.17 (1B GSM8K) to ~1.24 (8B MATH
+  zero_shot) — the model's token-level confidence variance correctly scales with task
+  difficulty even when binary discrimination degrades.
